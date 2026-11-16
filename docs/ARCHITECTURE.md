@@ -1,0 +1,124 @@
+# Architecture
+
+ambivox is two processes.
+
+- **`ambivox`** (Go) faces the network: it serves the web client, runs the
+  signalling WebSocket and terminates WebRTC.
+- **`ambivox-media`** (Rust, with assembly kernels and a C++ inference engine
+  linked in) does everything that touches audio samples.
+
+They talk over a Unix socket using the framing described in
+[PROTOCOL.md](PROTOCOL.md). The split keeps the garbage-collected process away
+from the real-time path, lets either side restart without the other, and makes
+the media engine testable without a browser.
+
+## Life of a sentence
+
+Alice speaks French, Bob listens in English.
+
+1. **Capture.** Alice's browser sends Opus over SRTP. Pion decrypts it and the
+   server reads RTP packets from her track.
+2. **Routing.** The room looks up the other participant. Same language: the
+   payload is written straight to Bob's outgoing track. Different language: the
+   payload and its RTP sequence number go to the media engine on the stream that
+   was opened for the pair (`fr → en`).
+3. **Decode.** The engine decodes Opus to 48 kHz mono. Sequence gaps are filled
+   with Opus packet-loss concealment (at most ten frames); packets that arrive
+   late are dropped. A delivery stall shorter than 400 ms is treated as jitter:
+   the audio resumes where it left off instead of having silence spliced in.
+4. **Resample.** A polyphase windowed-sinc filter brings 48 kHz down to the
+   16 kHz the recogniser expects. Its inner product is one of the assembly
+   kernels.
+5. **Segment.** An energy-based voice activity detector tracks the noise floor
+   and cuts the stream into utterances: 40 ms of speech opens one, 600 ms of
+   silence closes it, 300 ms of pre-roll keeps the first consonant, and anything
+   longer than 15 s is cut so latency stays bounded.
+6. **Interpret.** A worker thread runs the C++ engine on the utterance:
+   transcribe, translate, synthesise. Each stream's utterances are processed
+   strictly in order even though workers are shared between streams. The
+   transcript and the translation are sent back as captions as soon as each is
+   known.
+7. **Pace.** The synthesised audio is resampled to 48 kHz, queued, encoded to
+   20 ms Opus frames and released on a 20 ms clock, so the server can forward
+   frames as they arrive without buffering.
+8. **Deliver.** The server writes each frame to Bob's track and both browsers
+   render the captions.
+
+## The media engine
+
+```
+socket reader ──► per-stream "listen" thread ──► job queue ──► inference workers
+                   decode · resample · VAD                       (shared pool)
+                                                                      │
+socket writer ◄── per-stream "speak" thread ◄── playout buffer ◄──────┘
+                   encode · pace
+```
+
+- **Bounded everywhere.** The input queue holds 256 packets per stream, the
+  output queue 4096 frames per connection, the playout buffer 20 s of audio.
+  When a bound is hit the oldest or newest item is dropped and a counter is
+  incremented; nothing blocks the audio path and nothing grows without limit.
+- **Ordering.** A stream is placed on the run queue at most once. A worker takes
+  one utterance from it and puts the stream back if more are waiting, which
+  gives per-stream ordering with a shared pool and no per-stream thread for
+  inference.
+- **Shutdown.** Closing a stream flushes the open utterance, waits for pending
+  jobs and for the playout buffer to drain, then confirms. Dropping the
+  connection instead stops every stream immediately.
+
+### Assembly kernels
+
+`crates/dsp/src/kernels/` holds three routines, each in SSE2, AVX2+FMA and NEON:
+
+| Kernel | Used by |
+|---|---|
+| `dot_f32` | every output sample of the resampler, and frame energy for voice detection |
+| `pcm16_to_f32` | WAV input |
+| `f32_to_pcm16` | WAV output, with saturation, round-half-to-even and NaN → 0 |
+
+The files contain only instructions. Rust wraps each one in a naked function,
+which supplies the symbol and the calling convention for the target platform,
+and picks AVX2 or SSE2 at run time. Every kernel is tested against a scalar
+implementation over awkward lengths, unaligned slices and edge values; the
+integer conversions must match bit for bit.
+
+### Inference engine
+
+`engine/` exposes five C functions (`engine/include/ambivox/engine.h`). Two
+back ends implement them:
+
+- **`sim`** turns text into a sequence of tones and back. Each byte becomes two
+  differentially encoded tones out of seventeen, framed with a length and a
+  CRC-8. The signal survives Opus, resampling and gain changes, which is what
+  makes the end-to-end tests exact: the test asserts on the text decoded from
+  the audio that came out of the far end.
+- **`sussurro`** uses whisper.cpp for recognition, sussurro.cpp for translation
+  and sherpa-onnx with Piper voices for synthesis. Models load on first use and
+  stay resident; each model is guarded by its own mutex.
+
+The engine is built by CMake, driven from the Rust build script. The simulated
+back end links statically; the real one is a shared library so that its own
+dependencies stay out of the Rust link line.
+
+## The server
+
+- **Rooms** hold at most two peers. Whenever membership or the engine link
+  changes, the room recomputes which translation streams should exist and opens
+  or closes them to match.
+- **Signalling** is one WebSocket per participant: `join`, one `offer`/`answer`
+  exchange with complete ICE candidates, then events. See
+  [PROTOCOL.md](PROTOCOL.md).
+- **Engine link.** The server keeps one multiplexed connection to the engine and
+  reconnects with backoff. If the engine restarts mid-call the participants are
+  told, their streams are reopened when it returns, and the WebRTC sessions stay
+  up throughout.
+- **Same-language calls** never touch the engine.
+
+## What is deliberately simple
+
+- Voice detection is energy-based. It is predictable and cheap, and wrong in
+  loud rooms; a model-based detector would slot in behind the same interface.
+- Translation waits for the end of an utterance. Streaming recognition with
+  incremental translation would cut latency and is the natural next step.
+- One engine process serves one server process. Scaling out means running more
+  pairs behind a load balancer that keeps a room on one pair.
