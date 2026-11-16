@@ -1,0 +1,701 @@
+use std::collections::VecDeque;
+use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use ambivox_dsp::resample::resample;
+use ambivox_dsp::{Resampler, Segmenter, SegmenterConfig};
+use ambivox_engine::{Engine, ASR_SAMPLE_RATE, LANGUAGES};
+
+use crate::codec::{Decoder, Encoder, FRAME_MS, FRAME_SAMPLES, SAMPLE_RATE};
+use crate::protocol::{CaptionKind, Frame};
+
+const INPUT_QUEUE: usize = 256;
+const MAX_CONCEALED: u16 = 10;
+const IDLE: Duration = Duration::from_millis(100);
+const STALL_GRACE: u32 = 4;
+const UTTERANCE_GAP_MS: usize = 150;
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub workers: usize,
+    pub realtime: bool,
+    pub bitrate: i32,
+    pub max_backlog_ms: usize,
+    pub segmenter: SegmenterConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            workers: 2,
+            realtime: true,
+            bitrate: 32_000,
+            max_backlog_ms: 20_000,
+            segmenter: SegmenterConfig::default(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Stats {
+    pub streams: AtomicI64,
+    pub packets_in: AtomicU64,
+    pub packets_lost: AtomicU64,
+    pub packets_dropped: AtomicU64,
+    pub utterances: AtomicU64,
+    pub frames_out: AtomicU64,
+    pub frames_dropped: AtomicU64,
+    pub backlog_dropped_ms: AtomicU64,
+    pub errors: AtomicU64,
+    pub inference_ms: AtomicU64,
+}
+
+impl Stats {
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{\"streams\":{},\"packets_in\":{},\"packets_lost\":{},\"packets_dropped\":{},",
+                "\"utterances\":{},\"frames_out\":{},\"frames_dropped\":{},\"backlog_dropped_ms\":{},",
+                "\"errors\":{},\"inference_ms\":{}}}"
+            ),
+            self.streams.load(Ordering::Relaxed),
+            self.packets_in.load(Ordering::Relaxed),
+            self.packets_lost.load(Ordering::Relaxed),
+            self.packets_dropped.load(Ordering::Relaxed),
+            self.utterances.load(Ordering::Relaxed),
+            self.frames_out.load(Ordering::Relaxed),
+            self.frames_dropped.load(Ordering::Relaxed),
+            self.backlog_dropped_ms.load(Ordering::Relaxed),
+            self.errors.load(Ordering::Relaxed),
+            self.inference_ms.load(Ordering::Relaxed),
+        )
+    }
+}
+
+#[derive(Debug)]
+pub enum OpenError {
+    UnsupportedLanguage(String),
+    Codec(String),
+}
+
+impl fmt::Display for OpenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OpenError::UnsupportedLanguage(lang) => write!(f, "unsupported language: {lang}"),
+            OpenError::Codec(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for OpenError {}
+
+pub type Sink = SyncSender<Frame>;
+
+enum Input {
+    Packet { sequence: u16, data: Vec<u8> },
+    Close,
+}
+
+struct Job {
+    index: u32,
+    pcm: Vec<f32>,
+}
+
+#[derive(Default)]
+struct Playout {
+    samples: VecDeque<f32>,
+    pending_jobs: usize,
+    input_done: bool,
+}
+
+struct Shared {
+    id: u32,
+    source: String,
+    target: String,
+    sink: Sink,
+    jobs: Mutex<VecDeque<Job>>,
+    scheduled: AtomicBool,
+    playout: Mutex<Playout>,
+    playout_changed: Condvar,
+    closed: AtomicBool,
+}
+
+impl Shared {
+    fn emit(&self, frame: Frame, stats: &Stats) {
+        if let Err(TrySendError::Full(_)) = self.sink.try_send(frame) {
+            stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+}
+
+pub struct Pipeline {
+    engine: Arc<Engine>,
+    config: Config,
+    stats: Arc<Stats>,
+    run_queue: Sender<Arc<Shared>>,
+}
+
+impl Pipeline {
+    pub fn new(engine: Arc<Engine>, config: Config) -> Arc<Self> {
+        let (run_queue, jobs) = mpsc::channel::<Arc<Shared>>();
+        let jobs = Arc::new(Mutex::new(jobs));
+        let stats = Arc::new(Stats::default());
+        let pipeline = Arc::new(Self { engine, config, stats, run_queue });
+
+        for i in 0..pipeline.config.workers.max(1) {
+            let (jobs, pipeline) = (jobs.clone(), Arc::downgrade(&pipeline));
+            thread::Builder::new()
+                .name(format!("inference-{i}"))
+                .spawn(move || loop {
+                    let next = jobs.lock().unwrap().recv();
+                    let (Ok(shared), Some(pipeline)) = (next, pipeline.upgrade()) else { break };
+                    pipeline.work(&shared);
+                })
+                .expect("cannot spawn inference worker");
+        }
+        pipeline
+    }
+
+    pub fn stats(&self) -> &Arc<Stats> {
+        &self.stats
+    }
+
+    pub fn backend(&self) -> &str {
+        self.engine.backend()
+    }
+
+    pub fn open(self: &Arc<Self>, id: u32, source: &str, target: &str, sink: Sink) -> Result<Stream, OpenError> {
+        for lang in [source, target] {
+            if !LANGUAGES.contains(&lang) {
+                return Err(OpenError::UnsupportedLanguage(lang.to_string()));
+            }
+        }
+        let decoder = Decoder::new().map_err(|e| OpenError::Codec(e.to_string()))?;
+        let encoder = Encoder::new(self.config.bitrate).map_err(|e| OpenError::Codec(e.to_string()))?;
+
+        let shared = Arc::new(Shared {
+            id,
+            source: source.to_string(),
+            target: target.to_string(),
+            sink,
+            jobs: Mutex::new(VecDeque::new()),
+            scheduled: AtomicBool::new(false),
+            playout: Mutex::new(Playout::default()),
+            playout_changed: Condvar::new(),
+            closed: AtomicBool::new(false),
+        });
+        let (input, packets) = mpsc::sync_channel(INPUT_QUEUE);
+
+        let listener = {
+            let (pipeline, shared) = (self.clone(), shared.clone());
+            thread::Builder::new()
+                .name(format!("listen-{id}"))
+                .spawn(move || pipeline.listen(&shared, packets, decoder))
+                .expect("cannot spawn stream thread")
+        };
+        let speaker = {
+            let (pipeline, shared) = (self.clone(), shared.clone());
+            thread::Builder::new()
+                .name(format!("speak-{id}"))
+                .spawn(move || pipeline.speak(&shared, encoder))
+                .expect("cannot spawn stream thread")
+        };
+
+        self.stats.streams.fetch_add(1, Ordering::Relaxed);
+        Ok(Stream { input, shared, stats: self.stats.clone(), threads: vec![listener, speaker] })
+    }
+
+    fn listen(&self, shared: &Arc<Shared>, packets: Receiver<Input>, mut decoder: Decoder) {
+        let mut resampler = Resampler::new(SAMPLE_RATE, ASR_SAMPLE_RATE);
+        let mut segmenter = Segmenter::new(self.config.segmenter.clone());
+        let mut expected: Option<u16> = None;
+        let mut next_index = 0u32;
+        let mut idle = 0u32;
+        let mut wideband = Vec::with_capacity(FRAME_SAMPLES * 4);
+        let mut narrowband = Vec::with_capacity(FRAME_SAMPLES);
+        let silence = vec![0.0f32; ASR_SAMPLE_RATE as usize * IDLE.as_millis() as usize / 1000];
+
+        let mut submit = |pcm: Vec<f32>| {
+            let index = next_index;
+            next_index += 1;
+            self.submit(shared, Job { index, pcm });
+        };
+
+        while !shared.is_closed() {
+            match packets.recv_timeout(IDLE) {
+                Ok(Input::Packet { sequence, data }) => {
+                    idle = 0;
+                    self.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                    wideband.clear();
+                    if let Some(expected) = expected {
+                        let gap = sequence.wrapping_sub(expected);
+                        if gap >= 0x8000 {
+                            self.stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                        self.stats.packets_lost.fetch_add(gap as u64, Ordering::Relaxed);
+                        for _ in 0..gap.min(MAX_CONCEALED) {
+                            let _ = decoder.conceal(&mut wideband);
+                        }
+                    }
+                    expected = Some(sequence.wrapping_add(1));
+                    if decoder.decode(&data, &mut wideband).is_err() {
+                        self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                    narrowband.clear();
+                    resampler.process(&wideband, &mut narrowband);
+                    segmenter.push(&narrowband, &mut submit);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    idle += 1;
+                    if idle > STALL_GRACE && segmenter.is_active() {
+                        segmenter.push(&silence, &mut submit);
+                    }
+                }
+                Ok(Input::Close) | Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        if !shared.is_closed() {
+            segmenter.flush(&mut submit);
+        }
+        shared.playout.lock().unwrap().input_done = true;
+        shared.playout_changed.notify_all();
+    }
+
+    fn submit(&self, shared: &Arc<Shared>, job: Job) {
+        self.stats.utterances.fetch_add(1, Ordering::Relaxed);
+        shared.playout.lock().unwrap().pending_jobs += 1;
+        shared.jobs.lock().unwrap().push_back(job);
+        self.schedule(shared);
+    }
+
+    fn schedule(&self, shared: &Arc<Shared>) {
+        if !shared.scheduled.swap(true, Ordering::AcqRel) {
+            let _ = self.run_queue.send(shared.clone());
+        }
+    }
+
+    fn work(&self, shared: &Arc<Shared>) {
+        let job = shared.jobs.lock().unwrap().pop_front();
+        if let Some(job) = job {
+            if !shared.is_closed() {
+                self.interpret(shared, job);
+            }
+            shared.playout.lock().unwrap().pending_jobs -= 1;
+            shared.playout_changed.notify_all();
+        }
+        shared.scheduled.store(false, Ordering::Release);
+        if !shared.jobs.lock().unwrap().is_empty() {
+            self.schedule(shared);
+        }
+    }
+
+    fn interpret(&self, shared: &Shared, job: Job) {
+        let started = Instant::now();
+        let caption = |kind, text: &str| {
+            let frame = Frame::Caption { stream: shared.id, kind, utterance: job.index, text: text.to_string() };
+            shared.emit(frame, &self.stats);
+        };
+
+        let result = (|| {
+            let heard = self.engine.transcribe(&job.pcm, &shared.source)?;
+            let heard = heard.trim();
+            if heard.is_empty() {
+                return Ok(None);
+            }
+            caption(CaptionKind::Source, heard);
+
+            let translated = self.engine.translate(heard, &shared.source, &shared.target)?;
+            let translated = translated.trim();
+            if translated.is_empty() {
+                return Ok(None);
+            }
+            caption(CaptionKind::Translation, translated);
+
+            self.engine.synthesize(translated, &shared.target).map(Some)
+        })();
+        self.stats.inference_ms.fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+
+        match result {
+            Ok(Some(audio)) => {
+                let mut speech = resample(&audio.samples, audio.sample_rate, SAMPLE_RATE);
+                speech.resize(speech.len() + SAMPLE_RATE as usize * UTTERANCE_GAP_MS / 1000, 0.0);
+                self.enqueue(shared, &speech);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                shared.emit(Frame::Error { stream: shared.id, message: error.to_string() }, &self.stats);
+            }
+        }
+    }
+
+    fn enqueue(&self, shared: &Shared, speech: &[f32]) {
+        let limit = SAMPLE_RATE as usize * self.config.max_backlog_ms / 1000;
+        let mut playout = shared.playout.lock().unwrap();
+        playout.samples.extend(speech);
+        if playout.samples.len() > limit {
+            let excess = playout.samples.len() - limit;
+            playout.samples.drain(..excess);
+            let dropped_ms = excess as u64 * 1000 / SAMPLE_RATE as u64;
+            self.stats.backlog_dropped_ms.fetch_add(dropped_ms, Ordering::Relaxed);
+        }
+        drop(playout);
+        shared.playout_changed.notify_all();
+    }
+
+    fn speak(&self, shared: &Shared, mut encoder: Encoder) {
+        let mut frame = [0.0f32; FRAME_SAMPLES];
+        loop {
+            {
+                let mut playout = shared.playout.lock().unwrap();
+                loop {
+                    if shared.is_closed() {
+                        return;
+                    }
+                    if !playout.samples.is_empty() {
+                        break;
+                    }
+                    if playout.input_done && playout.pending_jobs == 0 {
+                        drop(playout);
+                        let _ = shared.sink.send(Frame::Closed { stream: shared.id });
+                        return;
+                    }
+                    playout = shared.playout_changed.wait_timeout(playout, IDLE).unwrap().0;
+                }
+            }
+
+            let mut deadline = Instant::now();
+            loop {
+                let taken = {
+                    let mut playout = shared.playout.lock().unwrap();
+                    let n = playout.samples.len().min(FRAME_SAMPLES);
+                    for (slot, sample) in frame.iter_mut().zip(playout.samples.drain(..n)) {
+                        *slot = sample;
+                    }
+                    n
+                };
+                if taken == 0 || shared.is_closed() {
+                    break;
+                }
+                frame[taken..].fill(0.0);
+                match encoder.encode(&frame) {
+                    Ok(packet) => {
+                        self.stats.frames_out.fetch_add(1, Ordering::Relaxed);
+                        shared.emit(Frame::Speech { stream: shared.id, packet }, &self.stats);
+                    }
+                    Err(_) => {
+                        self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                if self.config.realtime {
+                    deadline += Duration::from_millis(FRAME_MS);
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                }
+            }
+        }
+    }
+}
+
+pub struct Stream {
+    input: SyncSender<Input>,
+    shared: Arc<Shared>,
+    stats: Arc<Stats>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl Stream {
+    pub fn id(&self) -> u32 {
+        self.shared.id
+    }
+
+    pub fn push(&self, sequence: u16, packet: Vec<u8>) -> bool {
+        let accepted = self.input.try_send(Input::Packet { sequence, data: packet }).is_ok();
+        if !accepted {
+            self.stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        accepted
+    }
+
+    pub fn close(mut self) {
+        let _ = self.input.send(Input::Close);
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        self.shared.closed.store(true, Ordering::Release);
+        self.shared.playout_changed.notify_all();
+        self.stats.streams.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec;
+
+    fn pipeline(realtime: bool) -> Arc<Pipeline> {
+        Pipeline::new(Arc::new(Engine::sim()), Config { realtime, ..Config::default() })
+    }
+
+    fn spoken(engine: &Engine, text: &str, lang: &str) -> Vec<Vec<u8>> {
+        let audio = engine.synthesize(text, lang).unwrap();
+        let mut pcm = vec![0.0; SAMPLE_RATE as usize / 2];
+        pcm.extend(resample(&audio.samples, audio.sample_rate, SAMPLE_RATE));
+        pcm.resize(pcm.len() + SAMPLE_RATE as usize, 0.0);
+        Encoder::new(32_000).unwrap().encode_all(&pcm).unwrap()
+    }
+
+    struct Heard {
+        captions: Vec<(CaptionKind, u32, String)>,
+        errors: Vec<String>,
+        packets: Vec<Vec<u8>>,
+        closed: bool,
+    }
+
+    fn collect(frames: Receiver<Frame>) -> Heard {
+        let mut heard = Heard { captions: vec![], errors: vec![], packets: vec![], closed: false };
+        while let Ok(frame) = frames.recv_timeout(Duration::from_secs(20)) {
+            match frame {
+                Frame::Caption { kind, utterance, text, .. } => heard.captions.push((kind, utterance, text)),
+                Frame::Speech { packet, .. } => heard.packets.push(packet),
+                Frame::Error { message, .. } => heard.errors.push(message),
+                Frame::Closed { .. } => {
+                    heard.closed = true;
+                    break;
+                }
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+        heard
+    }
+
+    fn understand(engine: &Engine, packets: &[Vec<u8>], lang: &str) -> String {
+        let mut decoder = Decoder::new().unwrap();
+        let mut pcm = Vec::new();
+        for packet in packets {
+            decoder.decode(packet, &mut pcm).unwrap();
+        }
+        engine.transcribe(&resample(&pcm, SAMPLE_RATE, ASR_SAMPLE_RATE), lang).unwrap()
+    }
+
+    #[test]
+    fn speech_comes_out_translated() {
+        let engine = Engine::sim();
+        let pipeline = pipeline(false);
+        let (sink, frames) = mpsc::sync_channel(4096);
+        let stream = pipeline.open(1, "en", "fr", sink).unwrap();
+        for (i, packet) in spoken(&engine, "hello world", "en").into_iter().enumerate() {
+            assert!(stream.push(i as u16, packet));
+            if i % 64 == 63 {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        stream.close();
+
+        let heard = collect(frames);
+        assert!(heard.closed);
+        assert!(heard.errors.is_empty(), "{:?}", heard.errors);
+        assert_eq!(
+            heard.captions,
+            vec![
+                (CaptionKind::Source, 0, "hello world".to_string()),
+                (CaptionKind::Translation, 0, "bonjour monde".to_string()),
+            ]
+        );
+        assert_eq!(understand(&engine, &heard.packets, "fr"), "bonjour monde");
+        assert_eq!(pipeline.stats().utterances.load(Ordering::Relaxed), 1);
+        assert_eq!(pipeline.stats().streams.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn utterances_stay_in_order() {
+        let engine = Engine::sim();
+        let pipeline = pipeline(false);
+        let (sink, frames) = mpsc::sync_channel(8192);
+        let stream = pipeline.open(2, "it", "es", sink).unwrap();
+
+        let phrases = ["ciao amico", "grazie", "acqua e casa", "notte"];
+        let mut sequence = 0u16;
+        for phrase in phrases {
+            for packet in spoken(&engine, phrase, "it") {
+                while !stream.push(sequence, packet.clone()) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                sequence = sequence.wrapping_add(1);
+            }
+        }
+        stream.close();
+
+        let heard = collect(frames);
+        let translations: Vec<&str> = heard
+            .captions
+            .iter()
+            .filter(|(kind, ..)| *kind == CaptionKind::Translation)
+            .map(|(_, _, text)| text.as_str())
+            .collect();
+        assert_eq!(translations, ["hola amigo", "gracias", "agua y casa", "noche"]);
+        let indices: Vec<u32> = heard.captions.iter().map(|(_, index, _)| *index).collect();
+        assert_eq!(indices, [0, 0, 1, 1, 2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn packet_loss_is_tolerated() {
+        let engine = Engine::sim();
+        let pipeline = pipeline(false);
+        let (sink, frames) = mpsc::sync_channel(4096);
+        let stream = pipeline.open(3, "en", "fr", sink).unwrap();
+
+        let packets = spoken(&engine, "hello friend", "en");
+        let silent_prefix = 10;
+        for (i, packet) in packets.into_iter().enumerate() {
+            if i == silent_prefix / 2 || i == 1 {
+                continue;
+            }
+            stream.push(i as u16, packet.clone());
+            if i == 3 {
+                stream.push(1, packet);
+            }
+        }
+        stream.close();
+
+        let heard = collect(frames);
+        assert!(heard.captions.iter().any(|(_, _, text)| text == "bonjour ami"), "{:?}", heard.captions);
+        assert_eq!(pipeline.stats().packets_lost.load(Ordering::Relaxed), 2);
+        assert_eq!(pipeline.stats().packets_dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_delivery_stall_does_not_break_the_utterance() {
+        let engine = Engine::sim();
+        let pipeline = pipeline(false);
+        let (sink, frames) = mpsc::sync_channel(4096);
+        let stream = pipeline.open(8, "en", "fr", sink).unwrap();
+
+        let packets = spoken(&engine, "hello world", "en");
+        let middle = packets.len() / 2 - 10;
+        for (i, packet) in packets.into_iter().enumerate() {
+            if i == middle {
+                thread::sleep(Duration::from_millis(220));
+            }
+            stream.push(i as u16, packet);
+        }
+        stream.close();
+
+        let heard = collect(frames);
+        assert!(heard.captions.iter().any(|(_, _, text)| text == "bonjour monde"), "{:?}", heard.captions);
+    }
+
+    #[test]
+    fn garbage_packets_do_not_kill_the_stream() {
+        let engine = Engine::sim();
+        let pipeline = pipeline(false);
+        let (sink, frames) = mpsc::sync_channel(4096);
+        let stream = pipeline.open(4, "en", "it", sink).unwrap();
+
+        let mut sequence = 0u16;
+        for _ in 0..5 {
+            stream.push(sequence, vec![0xff; 9]);
+            sequence += 1;
+        }
+        for packet in spoken(&engine, "yes", "en") {
+            stream.push(sequence, packet);
+            sequence += 1;
+        }
+        stream.close();
+        let heard = collect(frames);
+        assert!(heard.captions.iter().any(|(_, _, text)| text == "sì"), "{:?}", heard.captions);
+    }
+
+    #[test]
+    fn unsupported_languages_are_refused() {
+        let pipeline = pipeline(false);
+        let (sink, _frames) = mpsc::sync_channel(16);
+        assert!(matches!(pipeline.open(5, "en", "de", sink), Err(OpenError::UnsupportedLanguage(l)) if l == "de"));
+        assert_eq!(pipeline.stats().streams.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn realtime_output_is_paced() {
+        let engine = Engine::sim();
+        let pipeline = pipeline(true);
+        let (sink, frames) = mpsc::sync_channel(4096);
+        let stream = pipeline.open(6, "en", "fr", sink).unwrap();
+        for (i, packet) in spoken(&engine, "yes", "en").into_iter().enumerate() {
+            stream.push(i as u16, packet);
+        }
+
+        let mut first = None;
+        let mut count = 0u32;
+        let mut last = Instant::now();
+        let closer = thread::spawn(move || stream.close());
+        while let Ok(frame) = frames.recv_timeout(Duration::from_secs(20)) {
+            match frame {
+                Frame::Speech { .. } => {
+                    first.get_or_insert_with(Instant::now);
+                    last = Instant::now();
+                    count += 1;
+                }
+                Frame::Closed { .. } => break,
+                _ => {}
+            }
+        }
+        closer.join().unwrap();
+        let elapsed = last.duration_since(first.unwrap());
+        let nominal = Duration::from_millis(FRAME_MS * (count as u64 - 1));
+        assert!(count > 20, "only {count} frames");
+        assert!(elapsed + Duration::from_millis(60) >= nominal, "{elapsed:?} for {count} frames");
+        assert!(elapsed <= nominal + Duration::from_millis(1500), "{elapsed:?} for {count} frames");
+    }
+
+    #[test]
+    fn dropping_a_stream_stops_it_quickly() {
+        let engine = Engine::sim();
+        let pipeline = pipeline(true);
+        let (sink, frames) = mpsc::sync_channel(4096);
+        let stream = pipeline.open(7, "en", "fr", sink).unwrap();
+        for (i, packet) in spoken(&engine, "hello world and friend", "en").into_iter().enumerate() {
+            stream.push(i as u16, packet);
+        }
+        thread::sleep(Duration::from_millis(300));
+        drop(stream);
+        thread::sleep(Duration::from_millis(300));
+        while frames.try_recv().is_ok() {}
+        thread::sleep(Duration::from_millis(200));
+        assert!(frames.try_recv().is_err());
+        assert_eq!(pipeline.stats().streams.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn stats_serialise_as_json() {
+        let stats = Stats::default();
+        stats.utterances.store(3, Ordering::Relaxed);
+        let json = stats.to_json();
+        assert!(json.starts_with('{') && json.ends_with('}'));
+        assert!(json.contains("\"utterances\":3"));
+        assert!(json.contains("\"streams\":0"));
+    }
+
+    #[test]
+    fn packet_file_helpers_agree_with_the_pipeline() {
+        let engine = Engine::sim();
+        let packets = spoken(&engine, "voice", "en");
+        let mut file = Vec::new();
+        codec::write_packets(&mut file, &packets).unwrap();
+        let restored = codec::read_packets(&mut file.as_slice()).unwrap();
+        assert_eq!(understand(&engine, &restored, "en"), "voice");
+    }
+}
