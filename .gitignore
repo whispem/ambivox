@@ -1,0 +1,8 @@
+/target/
+/build/
+/bin/
+/models/
+/third_party/
+node_modules/
+*.sock
+.DS_Store
