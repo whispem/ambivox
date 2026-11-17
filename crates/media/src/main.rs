@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ambivox_dsp::kernels;
 use ambivox_dsp::resample::resample;
-use ambivox_engine::{Engine, ASR_SAMPLE_RATE};
+use ambivox_engine::{ASR_SAMPLE_RATE, Engine};
 use ambivox_media::codec::{self, Decoder, Encoder, SAMPLE_RATE};
 use ambivox_media::pipeline::{Config, Pipeline};
 use ambivox_media::{log, server, wav};
@@ -18,7 +18,7 @@ ambivox-media — real-time speech translation engine
 
 USAGE:
     ambivox-media serve  [--socket PATH] [--backend sim|sussurro] [--models DIR]
-                         [--workers N] [--threads N] [--bitrate BPS]
+                         [--workers N] [--threads N] [--bitrate BPS] [--partials-ms MS]
     ambivox-media synth  --text TEXT --lang LANG (--out FILE | --wav FILE)
                          [--backend ...] [--models DIR]
     ambivox-media listen --lang LANG (--in FILE | --wav FILE)
@@ -27,6 +27,8 @@ USAGE:
 
 `synth` speaks TEXT and stores it as length-prefixed Opus packets (--out) or as
 a 48 kHz WAV file (--wav). `listen` transcribes either format.
+`--partials-ms` sets how often live captions are refreshed while someone is
+speaking (default 800; 0 turns them off).
 ";
 
 type Failure = Box<dyn std::error::Error>;
@@ -71,8 +73,12 @@ impl Args {
 
 fn serve(args: &Args) -> Result<(), Failure> {
     let socket = PathBuf::from(args.get("socket").unwrap_or("/tmp/ambivox-media.sock"));
-    let config =
-        Config { workers: args.number("workers", 2)?, bitrate: args.number("bitrate", 32_000)?, ..Config::default() };
+    let config = Config {
+        workers: args.number("workers", 2)?,
+        bitrate: args.number("bitrate", 32_000)?,
+        partial_interval_ms: args.number("partials-ms", 800)?,
+        ..Config::default()
+    };
     let engine = Arc::new(args.engine()?);
     engine
         .transcribe(&vec![0.0; 2 * ASR_SAMPLE_RATE as usize], "en")
@@ -83,11 +89,12 @@ fn serve(args: &Args) -> Result<(), Failure> {
     }
     let listener = UnixListener::bind(&socket)?;
     log::info(&format!(
-        "listening on {} (backend {}, {} workers, {} kernels)",
+        "listening on {} (backend {}, {} workers, {} kernels, live captions every {} ms)",
         socket.display(),
         engine.backend(),
         config.workers,
-        kernels::backend()
+        kernels::backend(),
+        config.partial_interval_ms
     ));
     server::serve(listener, Pipeline::new(engine, config))?;
     Ok(())

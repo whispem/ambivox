@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use ambivox_dsp::resample::resample;
 use ambivox_dsp::{Resampler, Segmenter, SegmenterConfig};
-use ambivox_engine::{Engine, ASR_SAMPLE_RATE, LANGUAGES};
+use ambivox_engine::{ASR_SAMPLE_RATE, Engine, LANGUAGES};
 
 use crate::codec::{Decoder, Encoder, FRAME_MS, FRAME_SAMPLES, SAMPLE_RATE};
 use crate::protocol::{CaptionKind, Frame};
@@ -18,6 +18,7 @@ const MAX_CONCEALED: u16 = 10;
 const IDLE: Duration = Duration::from_millis(100);
 const STALL_GRACE: u32 = 4;
 const UTTERANCE_GAP_MS: usize = 150;
+const MIN_PARTIAL_MS: usize = 600;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -25,6 +26,7 @@ pub struct Config {
     pub realtime: bool,
     pub bitrate: i32,
     pub max_backlog_ms: usize,
+    pub partial_interval_ms: usize,
     pub segmenter: SegmenterConfig,
 }
 
@@ -35,6 +37,7 @@ impl Default for Config {
             realtime: true,
             bitrate: 32_000,
             max_backlog_ms: 20_000,
+            partial_interval_ms: 800,
             segmenter: SegmenterConfig::default(),
         }
     }
@@ -47,11 +50,14 @@ pub struct Stats {
     pub packets_lost: AtomicU64,
     pub packets_dropped: AtomicU64,
     pub utterances: AtomicU64,
+    pub partials: AtomicU64,
+    pub partials_skipped: AtomicU64,
     pub frames_out: AtomicU64,
     pub frames_dropped: AtomicU64,
     pub backlog_dropped_ms: AtomicU64,
     pub errors: AtomicU64,
     pub inference_ms: AtomicU64,
+    pub partial_ms: AtomicU64,
 }
 
 impl Stats {
@@ -59,19 +65,23 @@ impl Stats {
         format!(
             concat!(
                 "{{\"streams\":{},\"packets_in\":{},\"packets_lost\":{},\"packets_dropped\":{},",
-                "\"utterances\":{},\"frames_out\":{},\"frames_dropped\":{},\"backlog_dropped_ms\":{},",
-                "\"errors\":{},\"inference_ms\":{}}}"
+                "\"utterances\":{},\"partials\":{},\"partials_skipped\":{},\"frames_out\":{},",
+                "\"frames_dropped\":{},\"backlog_dropped_ms\":{},\"errors\":{},\"inference_ms\":{},",
+                "\"partial_ms\":{}}}"
             ),
             self.streams.load(Ordering::Relaxed),
             self.packets_in.load(Ordering::Relaxed),
             self.packets_lost.load(Ordering::Relaxed),
             self.packets_dropped.load(Ordering::Relaxed),
             self.utterances.load(Ordering::Relaxed),
+            self.partials.load(Ordering::Relaxed),
+            self.partials_skipped.load(Ordering::Relaxed),
             self.frames_out.load(Ordering::Relaxed),
             self.frames_dropped.load(Ordering::Relaxed),
             self.backlog_dropped_ms.load(Ordering::Relaxed),
             self.errors.load(Ordering::Relaxed),
             self.inference_ms.load(Ordering::Relaxed),
+            self.partial_ms.load(Ordering::Relaxed),
         )
     }
 }
@@ -103,6 +113,7 @@ enum Input {
 struct Job {
     index: u32,
     pcm: Vec<f32>,
+    partial: bool,
 }
 
 #[derive(Default)]
@@ -119,6 +130,8 @@ struct Shared {
     sink: Sink,
     jobs: Mutex<VecDeque<Job>>,
     scheduled: AtomicBool,
+    partial_pending: AtomicBool,
+    last_partial: Mutex<(u32, String)>,
     playout: Mutex<Playout>,
     playout_changed: Condvar,
     closed: AtomicBool,
@@ -154,10 +167,12 @@ impl Pipeline {
             let (jobs, pipeline) = (jobs.clone(), Arc::downgrade(&pipeline));
             thread::Builder::new()
                 .name(format!("inference-{i}"))
-                .spawn(move || loop {
-                    let next = jobs.lock().unwrap().recv();
-                    let (Ok(shared), Some(pipeline)) = (next, pipeline.upgrade()) else { break };
-                    pipeline.work(&shared);
+                .spawn(move || {
+                    loop {
+                        let next = jobs.lock().unwrap().recv();
+                        let (Ok(shared), Some(pipeline)) = (next, pipeline.upgrade()) else { break };
+                        pipeline.work(&shared);
+                    }
                 })
                 .expect("cannot spawn inference worker");
         }
@@ -188,6 +203,8 @@ impl Pipeline {
             sink,
             jobs: Mutex::new(VecDeque::new()),
             scheduled: AtomicBool::new(false),
+            partial_pending: AtomicBool::new(false),
+            last_partial: Mutex::new((u32::MAX, String::new())),
             playout: Mutex::new(Playout::default()),
             playout_changed: Condvar::new(),
             closed: AtomicBool::new(false),
@@ -219,15 +236,13 @@ impl Pipeline {
         let mut expected: Option<u16> = None;
         let mut next_index = 0u32;
         let mut idle = 0u32;
+        let mut partial_at = 0usize;
+        let mut finished = Vec::new();
         let mut wideband = Vec::with_capacity(FRAME_SAMPLES * 4);
         let mut narrowband = Vec::with_capacity(FRAME_SAMPLES);
         let silence = vec![0.0f32; ASR_SAMPLE_RATE as usize * IDLE.as_millis() as usize / 1000];
-
-        let mut submit = |pcm: Vec<f32>| {
-            let index = next_index;
-            next_index += 1;
-            self.submit(shared, Job { index, pcm });
-        };
+        let samples = |ms: usize| ASR_SAMPLE_RATE as usize * ms / 1000;
+        let (min_partial, partial_step) = (samples(MIN_PARTIAL_MS), samples(self.config.partial_interval_ms));
 
         while !shared.is_closed() {
             match packets.recv_timeout(IDLE) {
@@ -252,29 +267,61 @@ impl Pipeline {
                     }
                     narrowband.clear();
                     resampler.process(&wideband, &mut narrowband);
-                    segmenter.push(&narrowband, &mut submit);
+                    segmenter.push(&narrowband, |u| finished.push(u));
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     idle += 1;
                     if idle > STALL_GRACE && segmenter.is_active() {
-                        segmenter.push(&silence, &mut submit);
+                        segmenter.push(&silence, |u| finished.push(u));
                     }
                 }
                 Ok(Input::Close) | Err(RecvTimeoutError::Disconnected) => break,
             }
+
+            for pcm in finished.drain(..) {
+                self.submit(shared, Job { index: next_index, pcm, partial: false });
+                next_index += 1;
+                partial_at = 0;
+            }
+            if partial_step == 0 {
+                continue;
+            }
+            if let Some(open) = segmenter.open_utterance() {
+                let due = open.len() >= min_partial.max(partial_at + partial_step);
+                if due && !shared.partial_pending.swap(true, Ordering::AcqRel) {
+                    partial_at = open.len();
+                    self.submit(shared, Job { index: next_index, pcm: open.to_vec(), partial: true });
+                }
+            }
         }
 
         if !shared.is_closed() {
-            segmenter.flush(&mut submit);
+            segmenter.flush(|u| finished.push(u));
+            for pcm in finished.drain(..) {
+                self.submit(shared, Job { index: next_index, pcm, partial: false });
+                next_index += 1;
+            }
         }
         shared.playout.lock().unwrap().input_done = true;
         shared.playout_changed.notify_all();
     }
 
     fn submit(&self, shared: &Arc<Shared>, job: Job) {
-        self.stats.utterances.fetch_add(1, Ordering::Relaxed);
-        shared.playout.lock().unwrap().pending_jobs += 1;
-        shared.jobs.lock().unwrap().push_back(job);
+        let mut jobs = shared.jobs.lock().unwrap();
+        if job.partial {
+            self.stats.partials.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.stats.utterances.fetch_add(1, Ordering::Relaxed);
+            let before = jobs.len();
+            jobs.retain(|queued| !queued.partial);
+            if jobs.len() != before {
+                self.stats.partials_skipped.fetch_add((before - jobs.len()) as u64, Ordering::Relaxed);
+                shared.partial_pending.store(false, Ordering::Release);
+            }
+            shared.playout.lock().unwrap().pending_jobs += 1;
+        }
+        jobs.push_back(job);
+        drop(jobs);
         self.schedule(shared);
     }
 
@@ -286,16 +333,54 @@ impl Pipeline {
 
     fn work(&self, shared: &Arc<Shared>) {
         let job = shared.jobs.lock().unwrap().pop_front();
-        if let Some(job) = job {
-            if !shared.is_closed() {
-                self.interpret(shared, job);
+        match job {
+            Some(job) if job.partial => {
+                if !shared.is_closed() {
+                    self.preview(shared, job);
+                }
+                shared.partial_pending.store(false, Ordering::Release);
             }
-            shared.playout.lock().unwrap().pending_jobs -= 1;
-            shared.playout_changed.notify_all();
+            Some(job) => {
+                if !shared.is_closed() {
+                    self.interpret(shared, job);
+                }
+                shared.playout.lock().unwrap().pending_jobs -= 1;
+                shared.playout_changed.notify_all();
+            }
+            None => {}
         }
         shared.scheduled.store(false, Ordering::Release);
         if !shared.jobs.lock().unwrap().is_empty() {
             self.schedule(shared);
+        }
+    }
+
+    fn preview(&self, shared: &Shared, job: Job) {
+        let started = Instant::now();
+        let result = (|| {
+            let heard = self.engine.transcribe(&job.pcm, &shared.source)?;
+            let heard = heard.trim();
+            {
+                let mut last = shared.last_partial.lock().unwrap();
+                if heard.is_empty() || (last.0 == job.index && last.1 == heard) {
+                    return Ok(());
+                }
+                *last = (job.index, heard.to_string());
+            }
+            let caption = |kind, text: &str| {
+                let frame = Frame::Caption { stream: shared.id, kind, utterance: job.index, text: text.to_string() };
+                shared.emit(frame, &self.stats);
+            };
+            caption(CaptionKind::SourcePartial, heard);
+            let translated = self.engine.translate(heard, &shared.source, &shared.target)?;
+            if !translated.trim().is_empty() {
+                caption(CaptionKind::TranslationPartial, translated.trim());
+            }
+            Ok::<(), ambivox_engine::Error>(())
+        })();
+        self.stats.partial_ms.fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+        if result.is_err() {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -461,15 +546,19 @@ mod tests {
 
     struct Heard {
         captions: Vec<(CaptionKind, u32, String)>,
+        partials: Vec<(CaptionKind, u32, String)>,
         errors: Vec<String>,
         packets: Vec<Vec<u8>>,
         closed: bool,
     }
 
     fn collect(frames: Receiver<Frame>) -> Heard {
-        let mut heard = Heard { captions: vec![], errors: vec![], packets: vec![], closed: false };
+        let mut heard = Heard { captions: vec![], partials: vec![], errors: vec![], packets: vec![], closed: false };
         while let Ok(frame) = frames.recv_timeout(Duration::from_secs(20)) {
             match frame {
+                Frame::Caption { kind, utterance, text, .. } if kind.is_partial() => {
+                    heard.partials.push((kind, utterance, text))
+                }
                 Frame::Caption { kind, utterance, text, .. } => heard.captions.push((kind, utterance, text)),
                 Frame::Speech { packet, .. } => heard.packets.push(packet),
                 Frame::Error { message, .. } => heard.errors.push(message),
@@ -519,6 +608,73 @@ mod tests {
         assert_eq!(understand(&engine, &heard.packets, "fr"), "bonjour monde");
         assert_eq!(pipeline.stats().utterances.load(Ordering::Relaxed), 1);
         assert_eq!(pipeline.stats().streams.load(Ordering::Relaxed), 0);
+    }
+
+    fn play(stream: &Stream, packets: Vec<Vec<u8>>, realtime: bool) {
+        let mut deadline = Instant::now();
+        for (i, packet) in packets.into_iter().enumerate() {
+            while !stream.push(i as u16, packet.clone()) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if realtime {
+                deadline += Duration::from_millis(FRAME_MS);
+                thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            }
+        }
+    }
+
+    #[test]
+    fn captions_grow_while_the_speaker_talks() {
+        let engine = Engine::sim();
+        let pipeline = pipeline(false);
+        let (sink, frames) = mpsc::sync_channel(4096);
+        let stream = pipeline.open(9, "en", "it", sink).unwrap();
+        play(&stream, spoken(&engine, "thanks my friend and the sea", "en"), true);
+        stream.close();
+
+        let heard = collect(frames);
+        let sources: Vec<&str> = heard
+            .partials
+            .iter()
+            .filter(|(kind, ..)| *kind == CaptionKind::SourcePartial)
+            .map(|(_, _, text)| text.as_str())
+            .collect();
+        assert!(sources.len() >= 3, "partials: {sources:?}");
+        for pair in sources.windows(2) {
+            assert!(pair[1].starts_with(pair[0]) && pair[1] != pair[0], "partials: {sources:?}");
+        }
+        assert!("thanks my friend and the sea".starts_with(sources[0]));
+        assert!(heard.partials.iter().all(|(_, index, _)| *index == 0));
+        assert!(
+            heard
+                .partials
+                .iter()
+                .any(|(kind, _, text)| *kind == CaptionKind::TranslationPartial && text.starts_with("grazie"))
+        );
+        assert_eq!(
+            heard.captions,
+            vec![
+                (CaptionKind::Source, 0, "thanks my friend and the sea".to_string()),
+                (CaptionKind::Translation, 0, "grazie my amico e the mare".to_string()),
+            ]
+        );
+        assert!(pipeline.stats().partials.load(Ordering::Relaxed) as usize >= sources.len());
+    }
+
+    #[test]
+    fn partials_can_be_turned_off() {
+        let engine = Engine::sim();
+        let config = Config { realtime: false, partial_interval_ms: 0, ..Config::default() };
+        let pipeline = Pipeline::new(Arc::new(Engine::sim()), config);
+        let (sink, frames) = mpsc::sync_channel(4096);
+        let stream = pipeline.open(10, "en", "fr", sink).unwrap();
+        play(&stream, spoken(&engine, "thanks my friend and the sea", "en"), true);
+        stream.close();
+
+        let heard = collect(frames);
+        assert!(heard.partials.is_empty());
+        assert_eq!(heard.captions.len(), 2);
+        assert_eq!(pipeline.stats().partials.load(Ordering::Relaxed), 0);
     }
 
     #[test]

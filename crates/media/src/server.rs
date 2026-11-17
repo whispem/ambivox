@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -122,7 +122,7 @@ mod tests {
     use crate::pipeline::Config;
     use crate::protocol::CaptionKind;
     use ambivox_dsp::resample::resample;
-    use ambivox_engine::{Engine, ASR_SAMPLE_RATE};
+    use ambivox_engine::{ASR_SAMPLE_RATE, Engine};
 
     fn start() -> (UnixStream, thread::JoinHandle<io::Result<()>>) {
         let (client, server) = UnixStream::pair().unwrap();
@@ -156,6 +156,7 @@ mod tests {
         let mut speech = Vec::new();
         loop {
             match read(&mut client) {
+                Frame::Caption { stream: 42, kind, .. } if kind.is_partial() => {}
                 Frame::Caption { stream: 42, kind, text, .. } => captions.push((kind, text)),
                 Frame::Speech { stream: 42, packet } => decoder.decode(&packet, &mut speech).unwrap(),
                 Frame::Closed { stream: 42 } => break,

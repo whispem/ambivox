@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const MAX_FRAME: usize = 64 * 1024;
 const HEADER: usize = 5;
 
@@ -9,6 +9,23 @@ const HEADER: usize = 5;
 pub enum CaptionKind {
     Source = 0,
     Translation = 1,
+    SourcePartial = 2,
+    TranslationPartial = 3,
+}
+
+impl CaptionKind {
+    pub fn new(translation: bool, partial: bool) -> Self {
+        match (translation, partial) {
+            (false, false) => CaptionKind::Source,
+            (true, false) => CaptionKind::Translation,
+            (false, true) => CaptionKind::SourcePartial,
+            (true, true) => CaptionKind::TranslationPartial,
+        }
+    }
+
+    pub fn is_partial(self) -> bool {
+        self as u8 & 2 != 0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,11 +161,10 @@ impl Frame {
                 if payload.len() < 5 {
                     return Err(invalid("truncated caption"));
                 }
-                let kind = match payload[0] {
-                    0 => CaptionKind::Source,
-                    1 => CaptionKind::Translation,
-                    _ => return Err(invalid("unknown caption kind")),
-                };
+                if payload[0] > 3 {
+                    return Err(invalid("unknown caption kind"));
+                }
+                let kind = CaptionKind::new(payload[0] & 1 != 0, payload[0] & 2 != 0);
                 Frame::Caption {
                     stream,
                     kind,
@@ -192,7 +208,7 @@ mod tests {
 
     fn samples() -> Vec<(&'static str, Frame)> {
         vec![
-            ("hello", Frame::Hello { version: 1, backend: "sim".into() }),
+            ("hello", Frame::Hello { version: 2, backend: "sim".into() }),
             ("open", Frame::Open { stream: 7, source: "en".into(), target: "fr".into() }),
             ("audio", Frame::Audio { stream: 7, sequence: 65535, packet: vec![0xde, 0xad, 0xbe, 0xef] }),
             ("close", Frame::Close { stream: 7 }),
@@ -200,6 +216,10 @@ mod tests {
             (
                 "caption",
                 Frame::Caption { stream: 9, kind: CaptionKind::Translation, utterance: 3, text: "voix à voix".into() },
+            ),
+            (
+                "partial",
+                Frame::Caption { stream: 9, kind: CaptionKind::SourcePartial, utterance: 4, text: "voix à".into() },
             ),
             ("error", Frame::Error { stream: 9, message: "unsupported: xx".into() }),
             ("closed", Frame::Closed { stream: 9 }),
@@ -245,6 +265,7 @@ mod tests {
         assert!(Frame::decode(&[0x7f, 0, 0, 0, 0]).is_err());
         assert!(Frame::decode(&[tag::OPEN, 0, 0, 0, 1, 5, b'e']).is_err());
         assert!(Frame::decode(&[tag::CAPTION, 0, 0, 0, 1, 9, 0, 0, 0, 0]).is_err());
+        assert!(Frame::decode(&[tag::CAPTION, 0, 0, 0, 1, 4, 0, 0, 0, 0]).is_err());
         assert!(Frame::decode(&[tag::ERROR, 0, 0, 0, 1, 0xff, 0xfe]).is_err());
 
         let oversized = ((MAX_FRAME + 1) as u32).to_be_bytes();
