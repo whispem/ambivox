@@ -73,6 +73,10 @@ impl Segmenter {
         self.active
     }
 
+    pub fn open_utterance(&self) -> Option<&[f32]> {
+        self.active.then_some(self.utterance.as_slice())
+    }
+
     pub fn noise_floor_db(&self) -> f32 {
         self.floor_db
     }
@@ -269,6 +273,25 @@ mod tests {
         let utterances = run(config, &audio);
         assert!(utterances.len() >= 2, "got {} utterances", utterances.len());
         assert!(utterances.iter().all(|u| seconds(u) <= 2.05));
+    }
+
+    #[test]
+    fn the_open_utterance_grows_until_it_is_emitted() {
+        let mut segmenter = Segmenter::new(SegmenterConfig::default());
+        segmenter.push(&vec![0.0; 8000], |_| panic!("silence emitted"));
+        assert!(segmenter.open_utterance().is_none());
+
+        let speech = tone(1.0, 0.3);
+        segmenter.push(&speech[..8000], |_| panic!("emitted too early"));
+        let first = segmenter.open_utterance().unwrap().len();
+        segmenter.push(&speech[8000..], |_| panic!("emitted too early"));
+        let second = segmenter.open_utterance().unwrap().len();
+        assert!(first > 4000 && second >= first + 8000, "{first} then {second}");
+
+        let mut emitted = Vec::new();
+        segmenter.push(&vec![0.0; 16000], |u| emitted.push(u));
+        assert_eq!(emitted.len(), 1);
+        assert!(segmenter.open_utterance().is_none());
     }
 
     #[test]

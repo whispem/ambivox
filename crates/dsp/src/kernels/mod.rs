@@ -16,11 +16,7 @@ use scalar as imp;
 pub fn backend() -> &'static str {
     #[cfg(all(feature = "asm", target_arch = "x86_64"))]
     {
-        if x86_64::has_avx2_fma() {
-            "avx2+fma"
-        } else {
-            "sse2"
-        }
+        if x86_64::has_avx2_fma() { "avx2+fma" } else { "sse2" }
     }
     #[cfg(all(feature = "asm", target_arch = "aarch64"))]
     {
