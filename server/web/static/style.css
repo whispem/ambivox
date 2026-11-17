@@ -11,6 +11,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
@@ -107,6 +108,8 @@ button.danger { border-color: var(--danger); color: var(--danger); }
 #captions .who { font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
 #captions .said { margin: 0.15rem 0 0; }
 #captions .heard { margin: 0.15rem 0 0; font-size: 0.85rem; color: var(--muted); }
+#captions li.draft .said, #captions li.draft .heard { font-style: italic; opacity: 0.7; }
+#captions li.draft .said::after { content: " …"; color: var(--muted); }
 
 #error {
   margin-top: 1.5rem;

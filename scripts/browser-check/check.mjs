@@ -81,17 +81,21 @@ try {
       .waitForFunction(
         (speaker) => {
           const item = [...document.querySelectorAll('#captions li.theirs')].find(
-            (li) => li.dataset.translation && li.querySelector('.who').textContent === speaker,
+            (li) => li.dataset.translationFinal && li.querySelector('.who').textContent === speaker,
           );
           return item ? { source: item.dataset.source, translation: item.dataset.translation } : false;
         },
-        { timeout: TIMEOUT_MS },
+        { timeout: TIMEOUT_MS, polling: 200 },
         who,
       )
       .then((handle) => handle.jsonValue());
 
   const heardByBob = await captionFrom(bob, 'Alice');
   const heardByAlice = await captionFrom(alice, 'Bob');
+  for (const page of [alice, bob]) {
+    const formShown = await page.evaluate(() => getComputedStyle(document.getElementById('join')).display !== 'none');
+    if (formShown) throw new Error('the join form is still visible during the call');
+  }
   const expect = (actual, wanted, label) => {
     if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
       throw new Error(`${label}: got ${JSON.stringify(actual)}, want ${JSON.stringify(wanted)}`);

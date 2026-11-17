@@ -28,7 +28,7 @@ function send(message) {
   if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify(message));
 }
 
-function addCaption({ from, kind, utterance, text }) {
+function addCaption({ from, kind, utterance, text, final = true }) {
   const id = `caption-${from}-${utterance}`;
   let item = document.getElementById(id);
   if (!item) {
@@ -44,10 +44,14 @@ function addCaption({ from, kind, utterance, text }) {
     item.querySelector('.who').textContent = mine ? 'You' : state.peer?.name ?? 'Guest';
     $('captions').append(item);
   }
+  const settled = `${kind}Final`;
+  if (!final && item.dataset[settled]) return;
   const mine = item.classList.contains('mine');
   const primary = mine ? 'source' : 'translation';
   item.querySelector(kind === primary ? '.said' : '.heard').textContent = text;
   item.dataset[kind] = text;
+  if (final) item.dataset[settled] = '1';
+  item.classList.toggle('draft', !(item.dataset.sourceFinal && item.dataset.translationFinal));
   item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
