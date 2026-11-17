@@ -42,6 +42,7 @@ type message struct {
 	From       string     `json:"from,omitempty"`
 	Kind       string     `json:"kind,omitempty"`
 	Utterance  *uint32    `json:"utterance,omitempty"`
+	Final      *bool      `json:"final,omitempty"`
 	Text       string     `json:"text,omitempty"`
 	Message    string     `json:"message,omitempty"`
 	Connected  *bool      `json:"connected,omitempty"`

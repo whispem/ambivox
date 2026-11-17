@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	Version  = 1
+	Version  = 2
 	MaxFrame = 64 * 1024
 	header   = 5
 )
@@ -33,16 +33,20 @@ const (
 type CaptionKind uint8
 
 const (
-	CaptionSource      CaptionKind = 0
-	CaptionTranslation CaptionKind = 1
+	CaptionSource             CaptionKind = 0
+	CaptionTranslation        CaptionKind = 1
+	CaptionSourcePartial      CaptionKind = 2
+	CaptionTranslationPartial CaptionKind = 3
 )
 
 func (k CaptionKind) String() string {
-	if k == CaptionTranslation {
+	if k&1 != 0 {
 		return "translation"
 	}
 	return "source"
 }
+
+func (k CaptionKind) Partial() bool { return k&2 != 0 }
 
 type Frame struct {
 	Type      Type
@@ -145,7 +149,7 @@ func Decode(body []byte) (Frame, error) {
 	case TypeSpeech:
 		f.Packet = append([]byte(nil), payload...)
 	case TypeCaption:
-		if len(payload) < 5 || payload[0] > 1 {
+		if len(payload) < 5 || payload[0] > 3 {
 			return Frame{}, ErrMalformed
 		}
 		f.Kind = CaptionKind(payload[0])

@@ -14,7 +14,8 @@ import (
 )
 
 // Engine echoes every audio packet back as speech, captions the first packet
-// of each stream and refuses streams whose target language is "zz".
+// of each stream (a live draft, then the final pair) and refuses streams whose
+// target language is "zz".
 type Engine struct {
 	Path string
 
@@ -146,6 +147,7 @@ func (e *Engine) serve(conn net.Conn) {
 			if !s.captioned {
 				s.captioned = true
 				ok = send(
+					protocol.Frame{Type: protocol.TypeCaption, Stream: id, Kind: protocol.CaptionSourcePartial, Text: "heard"},
 					protocol.Frame{Type: protocol.TypeCaption, Stream: id, Kind: protocol.CaptionSource, Text: "heard " + s.source},
 					protocol.Frame{Type: protocol.TypeCaption, Stream: id, Kind: protocol.CaptionTranslation, Text: "said " + s.target},
 				)

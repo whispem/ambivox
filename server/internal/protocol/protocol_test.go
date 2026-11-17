@@ -20,12 +20,13 @@ func samples() []struct {
 		name  string
 		frame Frame
 	}{
-		{"hello", Frame{Type: TypeHello, Version: 1, Text: "sim"}},
+		{"hello", Frame{Type: TypeHello, Version: 2, Text: "sim"}},
 		{"open", Frame{Type: TypeOpen, Stream: 7, Source: "en", Target: "fr"}},
 		{"audio", Frame{Type: TypeAudio, Stream: 7, Sequence: 65535, Packet: []byte{0xde, 0xad, 0xbe, 0xef}}},
 		{"close", Frame{Type: TypeClose, Stream: 7}},
 		{"speech", Frame{Type: TypeSpeech, Stream: 0x01020304, Packet: []byte{1, 2, 3}}},
 		{"caption", Frame{Type: TypeCaption, Stream: 9, Kind: CaptionTranslation, Utterance: 3, Text: "voix à voix"}},
+		{"partial", Frame{Type: TypeCaption, Stream: 9, Kind: CaptionSourcePartial, Utterance: 4, Text: "voix à"}},
 		{"error", Frame{Type: TypeError, Stream: 9, Text: "unsupported: xx"}},
 		{"closed", Frame{Type: TypeClosed, Stream: 9}},
 		{"stats", Frame{Type: TypeStats, Text: `{"streams":1}`}},
@@ -104,6 +105,7 @@ func TestMalformedFramesAreRejected(t *testing.T) {
 		{byte(TypeOpen), 0, 0, 0, 1, 5, 'e'},
 		{byte(TypeOpen), 0, 0, 0, 1, 1, 'e', 1, 'f', 0},
 		{byte(TypeCaption), 0, 0, 0, 1, 9, 0, 0, 0, 0},
+		{byte(TypeCaption), 0, 0, 0, 1, 4, 0, 0, 0, 0},
 		{byte(TypeCaption), 0, 0, 0, 1, 0},
 		{byte(TypeError), 0, 0, 0, 1, 0xff, 0xfe},
 		{byte(TypeAudio), 0, 0, 0, 1, 0},
@@ -133,6 +135,24 @@ func TestOversizedFieldsFailToEncode(t *testing.T) {
 	}
 	if _, err := (Frame{Type: 0x55}).Append(nil); err == nil {
 		t.Error("unknown type accepted")
+	}
+}
+
+func TestCaptionKinds(t *testing.T) {
+	cases := []struct {
+		kind    CaptionKind
+		name    string
+		partial bool
+	}{
+		{CaptionSource, "source", false},
+		{CaptionTranslation, "translation", false},
+		{CaptionSourcePartial, "source", true},
+		{CaptionTranslationPartial, "translation", true},
+	}
+	for _, c := range cases {
+		if c.kind.String() != c.name || c.kind.Partial() != c.partial {
+			t.Errorf("kind %d = %q partial %v", c.kind, c.kind.String(), c.kind.Partial())
+		}
 	}
 }
 

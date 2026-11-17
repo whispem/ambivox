@@ -72,6 +72,7 @@ type Hub struct {
 	packetsEngine *metrics.Counter
 	speechOut     *metrics.Counter
 	captions      *metrics.Counter
+	partials      *metrics.Counter
 }
 
 func New(cfg Config) (*Hub, error) {
@@ -132,7 +133,8 @@ func New(cfg Config) (*Hub, error) {
 	h.packetsDirect = m.Counter("ambivox_rtp_packets_relayed_total", "Packets relayed untouched between same-language participants.")
 	h.packetsEngine = m.Counter("ambivox_rtp_packets_translated_total", "Packets handed to the media engine.")
 	h.speechOut = m.Counter("ambivox_speech_packets_sent_total", "Translated speech packets sent to participants.")
-	h.captions = m.Counter("ambivox_captions_total", "Captions delivered to participants.")
+	h.captions = m.Counter("ambivox_captions_total", "Final captions delivered to participants.")
+	h.partials = m.Counter("ambivox_partial_captions_total", "Live caption updates delivered while someone speaks.")
 	m.Gauge("ambivox_rooms", "Open rooms.", func() float64 { return float64(h.Rooms()) })
 	m.Gauge("ambivox_peers", "Connected participants.", func() float64 { return float64(h.Peers()) })
 	m.Gauge("ambivox_media_connected", "Whether the media engine link is up.", func() float64 {
@@ -375,10 +377,15 @@ func (b *bridge) OnSpeech(packet []byte) {
 }
 
 func (b *bridge) OnCaption(kind captionKind, utterance uint32, text string) {
-	caption := message{Type: "caption", From: b.from.ID, Kind: kind.String(), Utterance: &utterance, Text: text}
+	final := !kind.Partial()
+	caption := message{Type: "caption", From: b.from.ID, Kind: kind.String(), Utterance: &utterance, Final: &final, Text: text}
 	b.from.notify(caption)
 	b.to.notify(caption)
-	b.room.hub.captions.Add(2)
+	if final {
+		b.room.hub.captions.Add(2)
+	} else {
+		b.room.hub.partials.Add(2)
+	}
 }
 
 func (b *bridge) OnError(text string) {

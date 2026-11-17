@@ -152,8 +152,15 @@ func TestTranslatedCall(t *testing.T) {
 	f.talk(bob, alice, 0xb2, 10)
 
 	for _, listener := range []*testclient.Client{alice, bob} {
+		draft := f.wait(listener, "caption")
+		if draft["final"] != false || draft.String("kind") != "source" || draft.String("text") != "heard" {
+			t.Errorf("draft caption = %v", draft)
+		}
 		source := f.wait(listener, "caption")
 		translation := f.wait(listener, "caption")
+		if source["final"] != true || translation["final"] != true {
+			t.Errorf("final flags = %v, %v", source["final"], translation["final"])
+		}
 		if source.String("from") != alice.ID || source.String("kind") != "source" || source.String("text") != "heard en" {
 			t.Errorf("source caption = %v", source)
 		}
@@ -169,7 +176,7 @@ func TestTranslatedCall(t *testing.T) {
 	if _, err := f.registry.WriteTo(&exposition); err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range []string{"ambivox_rooms 1\n", "ambivox_peers 2\n", "ambivox_media_connected 1\n"} {
+	for _, line := range []string{"ambivox_rooms 1\n", "ambivox_peers 2\n", "ambivox_media_connected 1\n", "ambivox_captions_total 8\n", "ambivox_partial_captions_total 4\n"} {
 		if !strings.Contains(exposition.String(), line) {
 			t.Errorf("metrics lack %q:\n%s", line, exposition.String())
 		}

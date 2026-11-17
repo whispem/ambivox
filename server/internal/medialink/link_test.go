@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,7 +33,11 @@ func (r *recorder) OnSpeech(packet []byte) {
 func (r *recorder) OnCaption(kind protocol.CaptionKind, _ uint32, text string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.captions = append(r.captions, kind.String()+": "+text)
+	prefix := kind.String()
+	if kind.Partial() {
+		prefix += " (partial)"
+	}
+	r.captions = append(r.captions, prefix+": "+text)
 }
 
 func (r *recorder) OnError(message string) {
@@ -99,8 +104,8 @@ func TestStreamLifecycle(t *testing.T) {
 	if len(rec.speech) != 3 || rec.speech[2][0] != 2 {
 		t.Errorf("speech = %x", rec.speech)
 	}
-	want := []string{"source: heard en", "translation: said fr"}
-	if len(rec.captions) != 2 || rec.captions[0] != want[0] || rec.captions[1] != want[1] {
+	want := []string{"source (partial): heard", "source: heard en", "translation: said fr"}
+	if strings.Join(rec.captions, "|") != strings.Join(want, "|") {
 		t.Errorf("captions = %q", rec.captions)
 	}
 	eventually(t, "stats", func() bool { return link.Stats()["streams"] == 1 })

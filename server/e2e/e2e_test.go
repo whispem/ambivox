@@ -175,7 +175,7 @@ func (h *harness) caption(client *testclient.Client, kind string) string {
 		if err != nil {
 			h.t.Fatal(err)
 		}
-		if event.String("kind") == kind {
+		if event.String("kind") == kind && event["final"] == true {
 			return event.String("text")
 		}
 	}
@@ -210,15 +210,31 @@ func TestTranslatedCallEndToEnd(t *testing.T) {
 	alice := h.join("e2e", "en", "Alice")
 	bob := h.join("e2e", "fr", "Bob")
 
-	heard := h.say(alice, bob, h.speak("hello world", "en"))
-	if got := h.caption(bob, "source"); got != "hello world" {
+	const said, translated = "hello world and friend and water", "bonjour monde et ami et eau"
+	heard := h.say(alice, bob, h.speak(said, "en"))
+	if got := h.caption(bob, "source"); got != said {
 		t.Errorf("source caption = %q", got)
 	}
-	if got := h.caption(alice, "translation"); got != "bonjour monde" {
+	if got := h.caption(alice, "translation"); got != translated {
 		t.Errorf("translation caption = %q", got)
 	}
-	if got := h.understand(heard, "fr"); got != "bonjour monde" {
-		t.Errorf("Bob heard %q, want %q", got, "bonjour monde")
+	if got := h.understand(heard, "fr"); got != translated {
+		t.Errorf("Bob heard %q, want %q", got, translated)
+	}
+
+	var drafts []string
+	for _, event := range bob.Events("caption") {
+		if event["final"] == false && event.String("kind") == "source" {
+			drafts = append(drafts, event.String("text"))
+		}
+	}
+	if len(drafts) == 0 || drafts[0] == said {
+		t.Errorf("no live caption reached the listener before the sentence ended: %q", drafts)
+	}
+	for _, draft := range drafts {
+		if !strings.HasPrefix(said, draft) {
+			t.Errorf("live caption %q is not a prefix of %q", draft, said)
+		}
 	}
 
 	heard = h.say(bob, alice, h.speak("merci ami", "fr"))
