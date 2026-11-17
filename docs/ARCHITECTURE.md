@@ -33,15 +33,19 @@ Alice speaks French, Bob listens in English.
    and cuts the stream into utterances: 40 ms of speech opens one, 600 ms of
    silence closes it, 300 ms of pre-roll keeps the first consonant, and anything
    longer than 15 s is cut so latency stays bounded.
-6. **Interpret.** A worker thread runs the C++ engine on the utterance:
+6. **Preview.** While the utterance is still open, the engine transcribes what
+   has been said so far, every 800 ms once it is 600 ms long, and translates
+   that draft. The drafts are sent as partial captions so both people watch the
+   sentence being written. They never produce audio.
+7. **Interpret.** A worker thread runs the C++ engine on the utterance:
    transcribe, translate, synthesise. Each stream's utterances are processed
    strictly in order even though workers are shared between streams. The
    transcript and the translation are sent back as captions as soon as each is
    known.
-7. **Pace.** The synthesised audio is resampled to 48 kHz, queued, encoded to
+8. **Pace.** The synthesised audio is resampled to 48 kHz, queued, encoded to
    20 ms Opus frames and released on a 20 ms clock, so the server can forward
    frames as they arrive without buffering.
-8. **Deliver.** The server writes each frame to Bob's track and both browsers
+9. **Deliver.** The server writes each frame to Bob's track and both browsers
    render the captions.
 
 ## The media engine
@@ -62,6 +66,10 @@ socket writer ◄── per-stream "speak" thread ◄── playout buffer ◄�
   one utterance from it and puts the stream back if more are waiting, which
   gives per-stream ordering with a shared pool and no per-stream thread for
   inference.
+- **Drafts never delay the sentence.** A stream has at most one draft queued or
+  running. When the utterance ends, any draft still waiting in the queue is
+  discarded and the final transcription takes its place, so a slow machine
+  shows fewer drafts rather than later audio.
 - **Shutdown.** Closing a stream flushes the open utterance, waits for pending
   jobs and for the playout buffer to drain, then confirms. Dropping the
   connection instead stops every stream immediately.
@@ -118,7 +126,9 @@ dependencies stay out of the Rust link line.
 
 - Voice detection is energy-based. It is predictable and cheap, and wrong in
   loud rooms; a model-based detector would slot in behind the same interface.
-- Translation waits for the end of an utterance. Streaming recognition with
-  incremental translation would cut latency and is the natural next step.
+- Drafts are recomputed from the start of the utterance each time, which is
+  simple and keeps whisper's context, at the cost of repeated work on long
+  sentences. Audio still waits for the end of the utterance; speaking
+  confirmed fragments early is the next step.
 - One engine process serves one server process. Scaling out means running more
   pairs behind a load balancer that keeps a room on one pair.

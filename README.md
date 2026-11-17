@@ -91,7 +91,7 @@ make run BACKEND=sussurro MODELS=/path/to/sussurro.cpp/models
 | `make test-engine` | C++ engine: tone codec, simulated backend, C ABI error handling. |
 | `make test-rust` | Assembly kernels against the scalar reference (with and without the `asm` feature), resampler, voice detection, Opus wrapper, wire protocol, pipeline ordering, loss handling, pacing. |
 | `make test-go` | Wire protocol against the same vectors as Rust, engine link and reconnection, rooms, signalling, HTTP endpoints, with real WebRTC connections and the race detector on. |
-| `make e2e` | Two WebRTC participants, the Go server and the real `ambivox-media` binary: a spoken phrase goes in, its translation comes out as audio and captions. |
+| `make e2e` | Two WebRTC participants, the Go server and the real `ambivox-media` binary: a spoken phrase goes in, live captions grow while it is spoken, and its translation comes out as audio and final captions. |
 | `make browser-check` | The same call from two headless Chrome tabs running the actual web client (needs Chrome and Node.js; not part of `make check`). |
 
 Continuous integration runs `make check` on Linux x86-64 and macOS arm64, so
@@ -114,8 +114,9 @@ scripts/           Model setup and the headless browser check
 ## Limits worth knowing
 
 - A room holds two participants.
-- Translation is per utterance: the listener hears a sentence once the speaker
-  pauses, typically one to three seconds later depending on hardware.
+- Captions are written live while someone speaks; the translated voice follows
+  once the speaker pauses, typically one to three seconds later depending on
+  hardware.
 - When both participants pick the same language the audio is relayed untouched.
 - The assembly kernels cover x86-64 and AArch64; other targets use the scalar
   Rust implementation (`--no-default-features` forces it anywhere).

@@ -45,6 +45,7 @@ Every flag has an environment variable; flags win.
 | `--workers` | `2` | utterances interpreted in parallel |
 | `--threads` | `4` | threads each model may use |
 | `--bitrate` | `32000` | Opus bitrate of translated speech |
+| `--partials-ms` | `800` | how often live captions are refreshed while someone speaks; `0` turns them off |
 
 Budget roughly `workers × threads` cores for inference. With two participants
 talking in turn, one worker is busy at a time.
@@ -104,12 +105,13 @@ Server:
 | `ambivox_rtp_packets_relayed_total` | counter | packets relayed untouched (same language) |
 | `ambivox_rtp_packets_translated_total` | counter | packets sent to the engine |
 | `ambivox_speech_packets_sent_total` | counter | translated packets sent to participants |
-| `ambivox_captions_total` | counter | captions delivered |
+| `ambivox_captions_total` | counter | final captions delivered |
+| `ambivox_partial_captions_total` | counter | live caption updates delivered |
 
 Engine counters arrive every two seconds and are re-exported with the prefix
 `ambivox_engine_`: `streams`, `packets_in`, `packets_lost`, `packets_dropped`,
-`utterances`, `frames_out`, `frames_dropped`, `backlog_dropped_ms`, `errors`,
-`inference_ms`.
+`utterances`, `partials`, `partials_skipped`, `frames_out`, `frames_dropped`,
+`backlog_dropped_ms`, `errors`, `inference_ms`, `partial_ms`.
 
 Worth alerting on: `ambivox_media_connected == 0`, a rising
 `ambivox_engine_errors`, and `ambivox_engine_backlog_dropped_ms` above zero,
@@ -129,6 +131,11 @@ shows ICE state changes.
 **Captions appear late.** Look at `ambivox_engine_inference_ms` against
 `ambivox_engine_utterances`. Raise `--threads`, or use quantised translation
 models (see sussurro.cpp).
+
+**Live captions lag or come in bursts.** Each draft re-runs recognition on the
+sentence so far. `partial_ms / partials` is the cost of one draft; if it is
+close to `--partials-ms`, raise the interval, or set it to `0` on a machine that
+struggles: the final captions and the voice are unaffected either way.
 
 **Words are cut or sentences merge.** The voice detector is energy-based; a
 headset helps more than any setting.

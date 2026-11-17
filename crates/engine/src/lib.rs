@@ -1,4 +1,4 @@
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fmt;
 use std::path::Path;
 use std::ptr::{self, NonNull};
@@ -21,7 +21,7 @@ mod ffi {
         pub threads: c_int,
     }
 
-    extern "C" {
+    unsafe extern "C" {
         pub fn ambivox_engine_open(config: *const Config) -> *mut Engine;
         pub fn ambivox_engine_close(engine: *mut Engine);
         pub fn ambivox_engine_backend(engine: *const Engine) -> *const c_char;
