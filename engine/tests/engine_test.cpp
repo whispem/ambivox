@@ -34,7 +34,7 @@ std::vector<float> resample_linear(const std::vector<float> & in, int from, int 
 }
 
 void test_modem_roundtrip() {
-    for (const char * text : {"a", "hello world", "voix à voix, sì!", ""}) {
+    for (const char * text : {"a", "hello world", "voix à voix, sì!", "  spaced   out ", ""}) {
         for (int rate : {16000, 22050, 48000}) {
             const auto pcm = ambivox::modem::encode(text, rate);
             CHECK(ambivox::modem::decode(pcm.data(), pcm.size(), rate) == text);
@@ -53,6 +53,19 @@ void test_modem_multi_frame() {
     for (int i = 0; i < 500; ++i) text += (char) ('a' + i % 26);
     const auto pcm = ambivox::modem::encode(text, 16000);
     CHECK(ambivox::modem::decode(pcm.data(), pcm.size(), 16000) == text);
+}
+
+void test_modem_reveals_words_as_they_arrive() {
+    const std::string text = "thanks my friend";
+    const auto pcm = ambivox::modem::encode(text, 16000);
+    std::vector<std::string> seen;
+    for (size_t n = 0; n <= pcm.size(); n += 1600) {
+        const std::string heard = ambivox::modem::decode(pcm.data(), n, 16000);
+        CHECK(text.compare(0, heard.size(), heard) == 0);
+        if (seen.empty() || seen.back() != heard) seen.push_back(heard);
+    }
+    const std::vector<std::string> expected = {"", "thanks ", "thanks my ", "thanks my friend"};
+    CHECK(seen == expected);
 }
 
 void test_modem_survives_noise_gain_and_resampling() {
@@ -74,7 +87,7 @@ void test_modem_rejects_garbage() {
     for (float & s : noise) s = uniform(rng);
     CHECK(ambivox::modem::decode(noise.data(), noise.size(), 16000).empty());
 
-    auto pcm = ambivox::modem::encode("hello world", 16000);
+    auto pcm = ambivox::modem::encode("helloworld", 16000);
     pcm.resize(pcm.size() / 2);
     CHECK(ambivox::modem::decode(pcm.data(), pcm.size(), 16000).empty());
 }
@@ -148,6 +161,7 @@ int main() {
     test_modem_roundtrip();
     test_modem_repeated_bytes();
     test_modem_multi_frame();
+    test_modem_reveals_words_as_they_arrive();
     test_modem_survives_noise_gain_and_resampling();
     test_modem_rejects_garbage();
     test_engine_pipeline();

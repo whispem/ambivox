@@ -111,7 +111,10 @@ std::vector<float> encode(const std::string & text, int sample_rate) {
     const uint8_t * data = (const uint8_t *) text.data();
     size_t offset = 0;
     do {
-        const size_t len = std::min(kMaxFrameBytes, text.size() - offset);
+        size_t end = text.find(' ', offset);
+        end = end == std::string::npos ? text.size() : text.find_first_not_of(' ', end);
+        if (end == std::string::npos) end = text.size();
+        const size_t len = std::min(kMaxFrameBytes, end - offset);
         if (offset > 0) append_silence(out, kGapSeconds, sample_rate);
         append_frame(out, data + offset, len, sample_rate);
         offset += len;
