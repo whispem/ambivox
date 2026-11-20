@@ -1,0 +1,36 @@
+name: ambivox
+
+x-ambivox: &ambivox
+  image: ambivox:${AMBIVOX_BACKEND:-sim}
+  build:
+    context: .
+    args:
+      BACKEND: ${AMBIVOX_BACKEND:-sim}
+  restart: unless-stopped
+  volumes:
+    - socket:/run/ambivox
+
+services:
+  media:
+    <<: *ambivox
+    command: ["ambivox-media", "serve", "--socket", "/run/ambivox/media.sock"]
+
+  server:
+    <<: *ambivox
+    command: ["ambivox"]
+    depends_on: [media]
+    environment:
+      AMBIVOX_HOST: ${AMBIVOX_HOST:?set AMBIVOX_HOST to this machine's IP address on the local network}
+      AMBIVOX_PUBLIC_IP: ${AMBIVOX_HOST}
+      AMBIVOX_ACCESS_KEY: ${AMBIVOX_ACCESS_KEY:-}
+      AMBIVOX_INVITE_TTL: ${AMBIVOX_INVITE_TTL:-24h}
+    ports:
+      - "8443:8443/tcp"
+      - "8443:8443/udp"
+    volumes:
+      - socket:/run/ambivox
+      - data:/data
+
+volumes:
+  socket:
+  data:

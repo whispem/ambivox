@@ -34,17 +34,23 @@ setup_sherpa() {
   fi
   local platform
   case "$(uname -s)-$(uname -m)" in
-    Darwin-arm64)  platform="osx-arm64" ;;
-    Darwin-x86_64) platform="osx-x64" ;;
-    Linux-x86_64)  platform="linux-x64" ;;
+    Darwin-arm64)  platform="osx-arm64-shared" ;;
+    Darwin-x86_64) platform="osx-x64-shared" ;;
+    Linux-x86_64)  platform="linux-x64-shared" ;;
+    Linux-aarch64) platform="linux-aarch64-shared-cpu" ;;
     *) die "no prebuilt sherpa-onnx for $(uname -s)-$(uname -m); build it and set AMBIVOX_SHERPA_DIR" ;;
   esac
-  local name="sherpa-onnx-$SHERPA_VERSION-$platform-shared"
+  local name="sherpa-onnx-$SHERPA_VERSION-$platform"
   say "downloading $name"
   mkdir -p "$THIRD_PARTY"
   curl -fSL "https://github.com/k2-fsa/sherpa-onnx/releases/download/$SHERPA_VERSION/$name.tar.bz2" \
     | tar xj -C "$THIRD_PARTY"
   mv "$THIRD_PARTY/$name" "$dest"
+  if [ ! -f "$dest/include/sherpa-onnx/c-api/c-api.h" ]; then
+    mkdir -p "$dest/include/sherpa-onnx/c-api"
+    curl -fsSL -o "$dest/include/sherpa-onnx/c-api/c-api.h" \
+      "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/$SHERPA_VERSION/sherpa-onnx/c-api/c-api.h"
+  fi
   if [ "$(uname -s)" = "Darwin" ]; then
     xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
   fi

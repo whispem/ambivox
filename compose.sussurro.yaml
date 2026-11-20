@@ -1,0 +1,16 @@
+services:
+  media:
+    image: ambivox:sussurro
+    build:
+      args:
+        BACKEND: sussurro
+    command: ["ambivox-media", "serve", "--socket", "/run/ambivox/media.sock", "--backend", "sussurro", "--models", "/models"]
+    volumes:
+      - socket:/run/ambivox
+      - ${AMBIVOX_MODELS:-./models}:/models:ro
+
+  server:
+    image: ambivox:sussurro
+    build:
+      args:
+        BACKEND: sussurro

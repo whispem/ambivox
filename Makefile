@@ -6,6 +6,7 @@ BACKEND ?= sim
 MODELS  ?= models
 LISTEN  ?= 127.0.0.1:8080
 SOCKET  ?= /tmp/ambivox-media.sock
+SERVER_FLAGS ?=
 
 MEDIA_BIN  := $(CURDIR)/target/release/ambivox-media
 SERVER_BIN := $(CURDIR)/bin/ambivox
@@ -15,7 +16,7 @@ MODEL_ARGS := $(if $(filter sussurro,$(BACKEND)),--models $(MODELS),)
 # The bundled libopus build predates CMake 4's minimum policy version.
 export CMAKE_POLICY_VERSION_MINIMUM ?= 3.5
 
-.PHONY: all build media server test test-engine test-rust test-go e2e lint check run browser-check clean
+.PHONY: all build media server test test-engine test-rust test-go e2e offline lint check run lan browser-check clean
 
 all: build
 
@@ -44,6 +45,10 @@ test-go:
 e2e: media
 	cd server && AMBIVOX_MEDIA_BIN=$(MEDIA_BIN) $(GO) test -tags e2e -count=1 ./e2e/
 
+offline: media
+	cd server && $(GO) test -c -tags e2e -o $(CURDIR)/bin/e2e.test ./e2e/
+	unshare -rn sh -c 'ip link set lo up && AMBIVOX_OFFLINE=1 AMBIVOX_MEDIA_BIN=$(MEDIA_BIN) $(CURDIR)/bin/e2e.test -test.count=1 -test.v'
+
 lint:
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
@@ -55,8 +60,11 @@ check: lint test e2e
 run: build
 	@trap 'kill 0' INT TERM EXIT; \
 	$(MEDIA_BIN) serve --socket $(SOCKET) --backend $(BACKEND) $(MODEL_ARGS) & \
-	$(SERVER_BIN) -listen $(LISTEN) -media-socket $(SOCKET) & \
+	$(SERVER_BIN) -listen $(LISTEN) -media-socket $(SOCKET) $(SERVER_FLAGS) & \
 	wait
+
+lan:
+	$(MAKE) run LISTEN=:8443 SERVER_FLAGS="-tls-self-signed -udp-port 8443 -data-dir $(CURDIR)/.ambivox $(SERVER_FLAGS)"
 
 browser-check: build
 	cd scripts/browser-check && npm install --no-audit --no-fund && \

@@ -32,3 +32,8 @@ jobs:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
       - run: make check
+      - name: offline call
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          make offline
