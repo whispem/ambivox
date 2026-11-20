@@ -3,8 +3,10 @@
 #   third_party/sherpa-onnx   prebuilt text-to-speech runtime
 #   models/                   whisper, OPUS-MT and Piper voice models
 #
-# usage: scripts/setup-sussurro.sh [sherpa] [voices] [whisper] [translation]
-# With no argument every step runs. Steps are idempotent.
+# usage: scripts/setup-sussurro.sh [sherpa] [voices] [whisper] [translation] [converter]
+# With no argument every step but converter runs, which translation runs when
+# it needs to. Steps are idempotent. AMBIVOX_CONVERT_PYTHON names a Python that
+# already has the converter's requirements, instead of a private venv.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -51,6 +53,7 @@ setup_sherpa() {
     curl -fsSL -o "$dest/include/sherpa-onnx/c-api/c-api.h" \
       "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/$SHERPA_VERSION/sherpa-onnx/c-api/c-api.h"
   fi
+  curl -fsSL -o "$dest/LICENSE" "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/$SHERPA_VERSION/LICENSE"
   if [ "$(uname -s)" = "Darwin" ]; then
     xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
   fi
@@ -93,35 +96,44 @@ setup_translation() {
     return
   fi
 
-  local source="$THIRD_PARTY/sussurro.cpp"
-  if [ ! -f "$source/scripts/convert.py" ]; then
+  setup_converter
+  for entry in "${missing[@]}"; do
+    read -r repo name <<<"$entry"
+    say "converting $repo"
+    "$PYTHON" "$CONVERTER/scripts/convert.py" --model "$repo" --outfile "$MODELS/$name.gguf.part"
+    mv "$MODELS/$name.gguf.part" "$MODELS/$name.gguf"
+  done
+}
+
+setup_converter() {
+  CONVERTER="$THIRD_PARTY/sussurro.cpp"
+  if [ ! -f "$CONVERTER/scripts/convert.py" ]; then
     say "fetching the sussurro.cpp converter"
     mkdir -p "$THIRD_PARTY"
-    git clone --quiet https://github.com/whispem/sussurro.cpp "$source"
-    git -C "$source" checkout --quiet "$SUSSURRO_REV"
+    git clone --quiet https://github.com/whispem/sussurro.cpp "$CONVERTER"
+    git -C "$CONVERTER" checkout --quiet "$SUSSURRO_REV"
+  fi
+  if [ -n "${AMBIVOX_CONVERT_PYTHON:-}" ]; then
+    PYTHON="$AMBIVOX_CONVERT_PYTHON"
+    return
   fi
   local venv="$THIRD_PARTY/convert-venv"
   if [ ! -x "$venv/bin/python" ]; then
     say "creating the conversion environment"
     python3 -m venv "$venv"
     "$venv/bin/pip" install --quiet --upgrade pip
-    "$venv/bin/pip" install --quiet -r "$source/requirements.txt"
+    "$venv/bin/pip" install --quiet -r "$CONVERTER/requirements.txt"
   fi
-  for entry in "${missing[@]}"; do
-    read -r repo name <<<"$entry"
-    say "converting $repo"
-    "$venv/bin/python" "$source/scripts/convert.py" --model "$repo" --outfile "$MODELS/$name.gguf.part"
-    mv "$MODELS/$name.gguf.part" "$MODELS/$name.gguf"
-  done
+  PYTHON="$venv/bin/python"
 }
 
 steps=("$@")
 [ ${#steps[@]} -gt 0 ] || steps=(sherpa voices whisper translation)
 for step in "${steps[@]}"; do
   case "$step" in
-    sherpa|voices|whisper|translation) "setup_$step" ;;
-    *) die "unknown step: $step (expected sherpa, voices, whisper or translation)" ;;
+    sherpa|voices|whisper|translation|converter) "setup_$step" ;;
+    *) die "unknown step: $step (expected sherpa, voices, whisper, translation or converter)" ;;
   esac
 done
 
-say "done — start the stack with: make run BACKEND=sussurro MODELS=$MODELS"
+say "done: models are in $MODELS"
