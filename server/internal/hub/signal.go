@@ -55,7 +55,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		reject(errors.New("the first message must be a join"))
 		return
 	}
-	peer, err := h.join(first.Room, first.Lang, first.Name)
+	peer, err := h.join(first.Room, first.Lang, first.Name, first.Token)
 	if err != nil {
 		reject(err)
 		return

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -37,6 +38,7 @@ type message struct {
 	Room       string     `json:"room,omitempty"`
 	Lang       string     `json:"lang,omitempty"`
 	Name       string     `json:"name,omitempty"`
+	Token      string     `json:"token,omitempty"`
 	Peer       *peerInfo  `json:"peer,omitempty"`
 	SDP        string     `json:"sdp,omitempty"`
 	From       string     `json:"from,omitempty"`
@@ -63,6 +65,8 @@ type Peer struct {
 	room *Room
 	hub  *Hub
 	send chan []byte
+
+	quietUntil atomic.Int64
 
 	mu  sync.Mutex
 	pc  *webrtc.PeerConnection

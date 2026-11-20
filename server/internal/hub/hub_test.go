@@ -31,7 +31,7 @@ type fixture struct {
 	url      string
 }
 
-func setup(t *testing.T, maxRooms int) *fixture {
+func setup(t *testing.T, maxRooms int, options ...func(*hub.Config)) *fixture {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -39,14 +39,18 @@ func setup(t *testing.T, maxRooms int) *fixture {
 	engine := medialinktest.Start(t)
 	link := medialink.Dial(ctx, engine.Path, log)
 	registry := metrics.NewRegistry()
-	h, err := hub.New(hub.Config{
+	cfg := hub.Config{
 		Link:            link,
 		Logger:          log,
 		Metrics:         registry,
 		MaxRooms:        maxRooms,
 		IncludeLoopback: true,
 		DisableMDNS:     true,
-	})
+	}
+	for _, option := range options {
+		option(&cfg)
+	}
+	h, err := hub.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

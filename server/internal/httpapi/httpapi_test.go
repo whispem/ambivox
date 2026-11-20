@@ -77,11 +77,13 @@ func TestEndpoints(t *testing.T) {
 		Languages      []string `json:"languages"`
 		Backend        string   `json:"backend"`
 		MediaConnected bool     `json:"mediaConnected"`
+		InviteOnly     bool     `json:"inviteOnly"`
+		AccessKey      bool     `json:"accessKey"`
 	}
 	if err := json.Unmarshal([]byte(body), &config); err != nil {
 		t.Fatalf("/config: %v in %q", err, body)
 	}
-	if len(config.Languages) != 4 || config.Backend != "fake" || !config.MediaConnected {
+	if len(config.Languages) != 4 || config.Backend != "fake" || !config.MediaConnected || config.InviteOnly || config.AccessKey {
 		t.Errorf("/config = %+v", config)
 	}
 	if resp.Header.Get("Cache-Control") != "no-store" {
@@ -111,6 +113,9 @@ func TestEndpoints(t *testing.T) {
 	}
 	if resp, err := http.Post(server.URL+"/healthz", "text/plain", nil); err != nil || resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("POST /healthz = %v, %v", resp.StatusCode, err)
+	}
+	if resp, err := http.Post(server.URL+"/rooms", "", nil); err != nil || resp.StatusCode != http.StatusCreated {
+		t.Errorf("POST /rooms = %v, %v", resp.StatusCode, err)
 	}
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"

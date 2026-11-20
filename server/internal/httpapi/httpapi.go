@@ -17,6 +17,7 @@ const contentSecurityPolicy = "default-src 'self'; connect-src 'self' ws: wss:; 
 func New(h *hub.Hub, link *medialink.Link, registry *metrics.Registry, static fs.FS) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", h.ServeWS)
+	mux.HandleFunc("POST /rooms", h.CreateRoom)
 	mux.Handle("GET /metrics", registry)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
@@ -35,6 +36,8 @@ func New(h *hub.Hub, link *medialink.Link, registry *metrics.Registry, static fs
 			"languages":      hub.Languages,
 			"backend":        link.Backend(),
 			"mediaConnected": link.Connected(),
+			"inviteOnly":     h.InviteOnly(),
+			"accessKey":      h.AccessKeyRequired(),
 		})
 	})
 	mux.Handle("GET /", http.FileServerFS(static))

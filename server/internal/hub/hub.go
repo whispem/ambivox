@@ -13,12 +13,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 
+	"github.com/whispem/ambivox/server/internal/invite"
 	"github.com/whispem/ambivox/server/internal/medialink"
 	"github.com/whispem/ambivox/server/internal/metrics"
 )
@@ -28,7 +30,10 @@ var Languages = []string{"en", "fr", "es", "it"}
 const (
 	roomCapacity = 2
 	maxNameRunes = 40
+	echoTail     = 600 * time.Millisecond
 )
+
+var silentFrame = []byte{0xf8, 0xff, 0xfe}
 
 var (
 	ErrRoomFull     = errors.New("this room already has two participants")
@@ -50,9 +55,14 @@ type Config struct {
 	PublicIPs       []string
 	UDPPortMin      uint16
 	UDPPortMax      uint16
+	UDPPort         uint16
 	IncludeLoopback bool
 	DisableMDNS     bool
 	AllowedOrigins  []string
+	EchoGuard       bool
+
+	Invites   *invite.Issuer
+	AccessKey string
 }
 
 type Hub struct {
@@ -61,6 +71,7 @@ type Hub struct {
 	log  *slog.Logger
 	ctx  context.Context
 	stop context.CancelFunc
+	mux  ice.UDPMux
 
 	mu       sync.Mutex
 	rooms    map[string]*Room
@@ -73,6 +84,7 @@ type Hub struct {
 	speechOut     *metrics.Counter
 	captions      *metrics.Counter
 	partials      *metrics.Counter
+	muted         *metrics.Counter
 }
 
 func New(cfg Config) (*Hub, error) {
@@ -112,6 +124,23 @@ func New(cfg Config) (*Hub, error) {
 			return nil, fmt.Errorf("udp port range: %w", err)
 		}
 	}
+	var mux ice.UDPMux
+	if cfg.UDPPort != 0 {
+		options := []ice.UDPMuxFromPortOption{
+			ice.UDPMuxFromPortWithNetworks(ice.NetworkTypeUDP4),
+			ice.UDPMuxFromPortWithLogger(settings.LoggerFactory.NewLogger("udpmux")),
+		}
+		if cfg.IncludeLoopback {
+			options = append(options, ice.UDPMuxFromPortWithLoopback())
+		}
+		multi, err := ice.NewMultiUDPMuxFromPort(int(cfg.UDPPort), options...)
+		if err != nil {
+			return nil, fmt.Errorf("udp port %d: %w", cfg.UDPPort, err)
+		}
+		mux = multi
+		settings.SetICEUDPMux(mux)
+		settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	}
 
 	ctx, stop := context.WithCancel(context.Background())
 	h := &Hub{
@@ -124,6 +153,7 @@ func New(cfg Config) (*Hub, error) {
 		log:   cfg.Logger,
 		ctx:   ctx,
 		stop:  stop,
+		mux:   mux,
 		rooms: make(map[string]*Room),
 	}
 
@@ -135,6 +165,7 @@ func New(cfg Config) (*Hub, error) {
 	h.speechOut = m.Counter("ambivox_speech_packets_sent_total", "Translated speech packets sent to participants.")
 	h.captions = m.Counter("ambivox_captions_total", "Final captions delivered to participants.")
 	h.partials = m.Counter("ambivox_partial_captions_total", "Live caption updates delivered while someone speaks.")
+	h.muted = m.Counter("ambivox_rtp_packets_muted_total", "Packets silenced because the sender's translation was playing.")
 	m.Gauge("ambivox_rooms", "Open rooms.", func() float64 { return float64(h.Rooms()) })
 	m.Gauge("ambivox_peers", "Connected participants.", func() float64 { return float64(h.Peers()) })
 	m.Gauge("ambivox_media_connected", "Whether the media engine link is up.", func() float64 {
@@ -161,6 +192,9 @@ func New(cfg Config) (*Hub, error) {
 func (h *Hub) Close() {
 	h.stop()
 	h.sessions.Wait()
+	if h.mux != nil {
+		_ = h.mux.Close()
+	}
 }
 
 func (h *Hub) Rooms() int {
@@ -193,9 +227,14 @@ func (h *Hub) iceServers() []webrtc.ICEServer {
 	return []webrtc.ICEServer{{URLs: h.cfg.ICEServers}}
 }
 
-func (h *Hub) join(roomID, lang, name string) (*Peer, error) {
+func (h *Hub) join(roomID, lang, name, token string) (*Peer, error) {
 	if !roomPattern.MatchString(roomID) {
 		return nil, ErrBadRoom
+	}
+	if h.cfg.Invites != nil {
+		if err := h.cfg.Invites.Verify(roomID, token); err != nil {
+			return nil, err
+		}
 	}
 	if !slices.Contains(Languages, lang) {
 		return nil, fmt.Errorf("%w: %q", ErrBadLanguage, lang)
@@ -359,6 +398,10 @@ func (r *Room) route(from *Peer, sequence uint16, payload []byte) {
 		other.writeSample(payload)
 		r.hub.packetsDirect.Inc()
 	case stream != nil:
+		if r.hub.cfg.EchoGuard && time.Now().UnixNano() < from.quietUntil.Load() {
+			payload = silentFrame
+			r.hub.muted.Inc()
+		}
 		stream.Write(sequence, payload)
 		r.hub.packetsEngine.Inc()
 	}
@@ -371,7 +414,10 @@ type bridge struct {
 	stream *medialink.Stream
 }
 
+// While the listener plays the translation, the speaker's microphone may pick
+// it up from the listener's loudspeaker and send it round again.
 func (b *bridge) OnSpeech(packet []byte) {
+	b.from.quietUntil.Store(time.Now().Add(opusDuration(packet) + echoTail).UnixNano())
 	b.to.writeSample(packet)
 	b.room.hub.speechOut.Inc()
 }

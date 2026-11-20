@@ -1,6 +1,15 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"crypto/tls"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/whispem/ambivox/server/internal/lan"
+)
 
 func TestParsePortRange(t *testing.T) {
 	cases := []struct {
@@ -52,6 +61,29 @@ func TestParseFlags(t *testing.T) {
 	if _, err := parseFlags([]string{"stray"}); err == nil {
 		t.Error("stray argument accepted")
 	}
+	t.Setenv("AMBIVOX_UDP_PORT", "8443")
+	t.Setenv("AMBIVOX_ACCESS_KEY", "secret")
+	o, err = parseFlags([]string{"-tls-self-signed", "-invite-ttl", "2h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.udpPort != 8443 || o.accessKey != "secret" || !o.selfSigned || o.inviteTTL != 2*time.Hour || o.openRooms || !o.echoGuard {
+		t.Errorf("options = %+v", o)
+	}
+	for _, args := range [][]string{
+		{"-udp-ports", "50000-50010"},
+		{"-udp-port", "70000"},
+		{"-tls-self-signed", "-tls-cert", "c", "-tls-key", "k"},
+		{"-invite-ttl", "0s"},
+	} {
+		if _, err := parseFlags(args); err == nil {
+			t.Errorf("%q accepted", args)
+		}
+	}
+	t.Setenv("AMBIVOX_ECHO_GUARD", "0")
+	if o, err := parseFlags(nil); err != nil || o.echoGuard {
+		t.Errorf("AMBIVOX_ECHO_GUARD=0 ignored: %+v, %v", o, err)
+	}
 	t.Setenv("AMBIVOX_MAX_ROOMS", "many")
 	if _, err := parseFlags(nil); err == nil {
 		t.Error("bad AMBIVOX_MAX_ROOMS accepted")
@@ -67,5 +99,26 @@ func TestNewLogger(t *testing.T) {
 	}
 	if _, err := newLogger("info", "xml"); err == nil {
 		t.Error("bad format accepted")
+	}
+}
+
+func TestAnnounce(t *testing.T) {
+	addr := &net.TCPAddr{IP: net.IPv4zero, Port: 8443}
+	var plain bytes.Buffer
+	announce(&plain, addr, nil, []string{"192.168.1.20"}, false)
+	if !strings.Contains(plain.String(), "http://localhost:8443") || strings.Contains(plain.String(), "192.168") {
+		t.Errorf("plain HTTP banner:\n%s", plain.String())
+	}
+
+	cert, err := lan.Certificate("", []string{"192.168.1.20"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secure bytes.Buffer
+	announce(&secure, addr, &tls.Config{Certificates: []tls.Certificate{cert}}, []string{"192.168.1.20"}, true)
+	for _, want := range []string{"https://192.168.1.20:8443\n", "https://localhost:8443\n", lan.Fingerprint(cert)} {
+		if !strings.Contains(secure.String(), want) {
+			t.Errorf("banner lacks %q:\n%s", want, secure.String())
+		}
 	}
 }

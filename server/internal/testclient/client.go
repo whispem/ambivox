@@ -49,11 +49,16 @@ func Dial(ctx context.Context, url string) (*Client, error) {
 }
 
 func Join(ctx context.Context, url, room, lang, name string) (*Client, Event, error) {
+	return JoinWith(ctx, url, Event{"room": room, "lang": lang, "name": name})
+}
+
+func JoinWith(ctx context.Context, url string, join Event) (*Client, Event, error) {
 	c, err := Dial(ctx, url)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := c.Send(Event{"type": "join", "room": room, "lang": lang, "name": name}); err != nil {
+	join["type"] = "join"
+	if err := c.Send(join); err != nil {
 		c.Close()
 		return nil, nil, err
 	}
