@@ -15,11 +15,9 @@
     </header>
 
     <form id="join" autocomplete="off">
+      <p id="invited" hidden>You have been invited to a call.</p>
       <label>Your name
         <input id="name" maxlength="40" placeholder="Guest">
-      </label>
-      <label>Room
-        <input id="room" required pattern="[A-Za-z0-9_\-]{1,64}" placeholder="kitchen-table">
       </label>
       <label>I speak
         <select id="lang">
@@ -29,7 +27,10 @@
           <option value="it">Italiano</option>
         </select>
       </label>
-      <button type="submit">Join the call</button>
+      <label id="key-field" hidden>Access key
+        <input id="key" type="password" autocomplete="current-password">
+      </label>
+      <button id="go" type="submit">Start a call</button>
     </form>
 
     <section id="call" hidden>
@@ -41,6 +42,14 @@
         <div class="actions">
           <button id="mute" type="button" aria-pressed="false">Mute</button>
           <button id="leave" type="button" class="danger">Leave</button>
+        </div>
+      </div>
+      <div id="invite" hidden>
+        <p id="invite-text">Send this link to the person you want to talk to.</p>
+        <div class="link">
+          <input id="invite-link" readonly aria-label="Invitation link">
+          <button id="copy" type="button">Copy</button>
+          <button id="share" type="button" hidden>Share</button>
         </div>
       </div>
       <p id="status" class="muted" role="status"></p>

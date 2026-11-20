@@ -1,7 +1,9 @@
-// Opens the web client twice in headless Chrome, feeds both microphones with a
-// phrase spoken by the simulated backend, and checks the translated captions.
+// Starts a call from the web client in headless Chrome over the self-signed
+// HTTPS setup, opens the invitation in a second page, feeds both microphones
+// with a phrase spoken by the simulated backend, and checks the captions.
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { get } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import puppeteer from 'puppeteer-core';
@@ -15,6 +17,8 @@ const CHROME_CANDIDATES = [
 ];
 const PORT = process.env.PORT ?? '8097';
 const TIMEOUT_MS = 40_000;
+const ACCESS_KEY = 'browser-check';
+const ORIGIN = `https://127.0.0.1:${PORT}`;
 
 const required = (name) => {
   const value = process.env[name];
@@ -33,7 +37,15 @@ execFileSync(mediaBin, ['synth', '--text', 'hello world', '--lang', 'en', '--wav
 
 const children = [
   spawn(mediaBin, ['serve', '--socket', socket], { stdio: 'ignore' }),
-  spawn(serverBin, ['-listen', `127.0.0.1:${PORT}`, '-media-socket', socket], { stdio: 'ignore' }),
+  spawn(
+    serverBin,
+    [
+      '-listen', `127.0.0.1:${PORT}`, '-media-socket', socket, '-tls-self-signed', '-data-dir', dir, '-udp-port', PORT,
+      // Both fake microphones repeat their phrase without ever pausing.
+      '-echo-guard=false',
+    ],
+    { stdio: 'ignore', env: { ...process.env, AMBIVOX_ACCESS_KEY: ACCESS_KEY } },
+  ),
 ];
 let browser;
 const cleanup = async () => {
@@ -42,12 +54,18 @@ const cleanup = async () => {
   rmSync(dir, { recursive: true, force: true });
 };
 
+const ready = () =>
+  new Promise((resolve) => {
+    get(`${ORIGIN}/readyz`, { rejectUnauthorized: false }, (response) => {
+      response.resume();
+      resolve(response.statusCode === 200);
+    }).on('error', () => resolve(false));
+  });
+
 async function waitForServer() {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    try {
-      if ((await fetch(`http://127.0.0.1:${PORT}/readyz`)).ok) return;
-    } catch {}
+    if (await ready()) return;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error('the server never became ready');
@@ -60,6 +78,7 @@ try {
     headless: true,
     args: [
       '--no-sandbox',
+      '--ignore-certificate-errors',
       '--use-fake-ui-for-media-stream',
       '--use-fake-device-for-media-stream',
       `--use-file-for-fake-audio-capture=${wav}`,
@@ -67,35 +86,61 @@ try {
     ],
   });
 
-  const open = async (lang, name) => {
+  const open = async (url, name) => {
     const page = await browser.newPage();
     page.on('pageerror', (error) => console.error(`[${name}] ${error.message}`));
-    await page.goto(`http://127.0.0.1:${PORT}/?room=browser-check&lang=${lang}&name=${name}&auto=1&raw=1`);
+    await page.goto(url);
     return page;
   };
-  const alice = await open('en', 'Alice');
-  const bob = await open('fr', 'Bob');
 
-  const captionFrom = (page, who) =>
+  const alice = await open(`${ORIGIN}/?lang=en&name=Alice&raw=1`, 'Alice');
+  await alice.waitForSelector('#key', { visible: true });
+  await alice.type('#key', 'wrong');
+  await alice.click('#go');
+  await alice.waitForFunction(() => document.getElementById('error').textContent.includes('access key'), { polling: 200 });
+  await alice.evaluate(() => { document.getElementById('key').value = ''; });
+  await alice.type('#key', ACCESS_KEY);
+  await alice.click('#go');
+  const link = await alice
+    .waitForFunction(() => document.getElementById('invite-link').value, { timeout: TIMEOUT_MS, polling: 200 })
+    .then((handle) => handle.jsonValue());
+
+  if (!link.startsWith(`${ORIGIN}/#room=`)) throw new Error(`the invitation should travel in the URL fragment: ${link}`);
+
+  const forged = await open(`${link.replace(/t=[^.]+/, 't=zz')}&lang=es&name=Eve&auto=1&raw=1`, 'Eve');
+  await forged.waitForFunction(() => document.getElementById('error').textContent.includes('invitation'), {
+    timeout: TIMEOUT_MS,
+    polling: 200,
+  });
+  await forged.close();
+
+  const bob = await open(`${link}&lang=fr&name=Bob&auto=1&raw=1`, 'Bob');
+
+  const captionFrom = (page, who, said) =>
     page
       .waitForFunction(
-        (speaker) => {
+        (speaker, source) => {
           const item = [...document.querySelectorAll('#captions li.theirs')].find(
-            (li) => li.dataset.translationFinal && li.querySelector('.who').textContent === speaker,
+            (li) =>
+              li.dataset.translationFinal &&
+              li.dataset.source === source &&
+              li.querySelector('.who').textContent === speaker,
           );
           return item ? { source: item.dataset.source, translation: item.dataset.translation } : false;
         },
         { timeout: TIMEOUT_MS, polling: 200 },
         who,
+        said,
       )
       .then((handle) => handle.jsonValue());
 
-  const heardByBob = await captionFrom(bob, 'Alice');
-  const heardByAlice = await captionFrom(alice, 'Bob');
+  const heardByBob = await captionFrom(bob, 'Alice', 'hello world');
+  const heardByAlice = await captionFrom(alice, 'Bob', 'hello world');
   for (const page of [alice, bob]) {
     const formShown = await page.evaluate(() => getComputedStyle(document.getElementById('join')).display !== 'none');
     if (formShown) throw new Error('the join form is still visible during the call');
   }
+  if (await alice.$eval('#invite', (box) => !box.hidden)) throw new Error('the invitation is still shown once Bob joined');
   const expect = (actual, wanted, label) => {
     if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
       throw new Error(`${label}: got ${JSON.stringify(actual)}, want ${JSON.stringify(wanted)}`);
@@ -103,7 +148,7 @@ try {
   };
   expect(heardByBob, { source: 'hello world', translation: 'bonjour monde' }, 'Bob hearing Alice');
   expect(heardByAlice, { source: 'hello world', translation: 'hello world' }, 'Alice hearing Bob');
-  console.log('browser check passed: captions translated end to end in Chrome');
+  console.log('browser check passed: invited call over HTTPS translated end to end in Chrome');
 } catch (error) {
   console.error(`browser check failed: ${error.message}`);
   process.exitCode = 1;

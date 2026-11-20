@@ -1,8 +1,11 @@
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
+for (const [key, value] of new URLSearchParams(location.hash.slice(1))) params.set(key, value);
 const GATHERING_TIMEOUT_MS = 3000;
 
-const state = { ws: null, pc: null, mic: null, me: null, peer: null, leaving: false };
+const invitation = params.has('room') ? { room: params.get('room'), token: params.get('t') ?? '' } : null;
+
+const state = { ws: null, pc: null, mic: null, me: null, peer: null, leaving: false, invite: null };
 
 function setState(name) {
   document.body.dataset.state = name;
@@ -22,6 +25,32 @@ function setPeer(peer) {
   $('peer-label').textContent = peer
     ? `Talking with ${peer.name} (${peer.lang})`
     : 'Waiting for someone to join…';
+  $('invite').hidden = Boolean(peer) || !state.invite;
+}
+
+function inviteLink({ room, token }) {
+  const query = new URLSearchParams({ room });
+  if (token) query.set('t', token);
+  return `${location.origin}/#${query}`;
+}
+
+function showInvite(grant) {
+  state.invite = grant;
+  $('invite-link').value = inviteLink(grant);
+  $('copy').textContent = 'Copy';
+  const until = grant.expires
+    ? ` It works until ${new Date(grant.expires).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}.`
+    : '';
+  $('invite-text').textContent = `Send this link to the person you want to talk to.${until}`;
+}
+
+async function createRoom() {
+  const headers = {};
+  const key = $('key').value;
+  if (key) headers.Authorization = `Bearer ${key}`;
+  const response = await fetch('/rooms', { method: 'POST', headers });
+  if (!response.ok) throw new Error((await response.text()).trim() || `could not start a call (${response.status})`);
+  return response.json();
 }
 
 function send(message) {
@@ -96,12 +125,15 @@ async function handle(message) {
       await state.pc.setRemoteDescription({ type: 'answer', sdp: message.sdp });
       break;
     case 'peer-joined':
+      showError('');
       setPeer(message.peer);
       break;
     case 'peer-left':
+      showError('');
       setPeer(null);
       break;
     case 'caption':
+      showError('');
       addCaption(message);
       break;
     case 'media':
@@ -126,7 +158,7 @@ function hangUp() {
   setState('idle');
 }
 
-async function join(room, lang, name) {
+async function join({ room, token }, lang, name) {
   showError('');
   state.leaving = false;
   setState('connecting');
@@ -143,13 +175,13 @@ async function join(room, lang, name) {
 
   $('join').hidden = true;
   $('call').hidden = false;
-  $('room-label').textContent = room;
+  $('room-label').textContent = token ? 'Private call' : room;
   setPeer(null);
 
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${scheme}://${location.host}/ws`);
   state.ws = ws;
-  ws.addEventListener('open', () => send({ type: 'join', room, lang, name }));
+  ws.addEventListener('open', () => send({ type: 'join', room, lang, name, token }));
   ws.addEventListener('message', (event) => {
     handle(JSON.parse(event.data)).catch((error) => showError(error.message));
   });
@@ -161,10 +193,40 @@ async function join(room, lang, name) {
   });
 }
 
-$('join').addEventListener('submit', (event) => {
+$('join').addEventListener('submit', async (event) => {
   event.preventDefault();
-  join($('room').value.trim(), $('lang').value, $('name').value.trim());
+  showError('');
+  const lang = $('lang').value;
+  const name = $('name').value.trim();
+  if (invitation) {
+    state.invite = null;
+    await join(invitation, lang, name);
+    return;
+  }
+  try {
+    showInvite(await createRoom());
+  } catch (error) {
+    showError(error.message);
+    return;
+  }
+  await join(state.invite, lang, name);
 });
+
+$('copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('invite-link').value);
+    $('copy').textContent = 'Copied';
+  } catch {
+    $('invite-link').select();
+  }
+});
+
+if (navigator.share) {
+  $('share').hidden = false;
+  $('share').addEventListener('click', () => {
+    navigator.share({ title: 'ambivox', text: 'Join my call', url: $('invite-link').value }).catch(() => {});
+  });
+}
 
 $('leave').addEventListener('click', hangUp);
 
@@ -175,7 +237,15 @@ $('mute').addEventListener('click', () => {
   $('mute').textContent = muted ? 'Unmute' : 'Mute';
 });
 
-for (const field of ['name', 'room', 'lang']) {
+for (const field of ['name', 'lang']) {
   if (params.has(field)) $(field).value = params.get(field);
 }
-if (params.get('auto') === '1' && $('room').value) $('join').requestSubmit();
+if (invitation) {
+  $('invited').hidden = false;
+  $('go').textContent = 'Join the call';
+}
+fetch('/config')
+  .then((response) => response.json())
+  .then((config) => { $('key-field').hidden = !config.accessKey || Boolean(invitation); })
+  .catch(() => {});
+if (params.get('auto') === '1') $('join').requestSubmit();
