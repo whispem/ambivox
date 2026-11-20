@@ -3,10 +3,12 @@
 Voice calls where each person speaks their own language and hears the other in
 theirs — self-hosted, with no cloud service in the loop.
 
-Two people open a web page, pick a language and talk. ambivox listens to each
-speaker, transcribes, translates, re-synthesises the sentence in the listener's
-language and plays it over WebRTC, with live captions on both sides. Speech
-recognition, translation and synthesis all run on your own machine.
+One person starts a call and sends a link; the other opens it, picks a
+language and talks. ambivox listens to each speaker, transcribes, translates,
+re-synthesises the sentence in the listener's language and plays it over
+WebRTC, with live captions on both sides. Speech recognition, translation and
+synthesis all run on your own machine, and a call needs no Internet connection
+at all: a laptop and a Wi-Fi network are enough.
 
 Supported languages: English, French, Spanish and Italian, in every direction.
 
@@ -44,7 +46,26 @@ Each one sits on a real boundary:
 | Assembly | `crates/dsp/src/kernels/` | The inner loops of resampling, level metering and sample conversion (SSE2, AVX2+FMA, NEON), each checked against a scalar reference. |
 | C++ | `engine/` | Inference. It wraps whisper.cpp, [sussurro.cpp](https://github.com/whispem/sussurro.cpp) and sherpa-onnx behind a small C ABI. |
 
-## Quick start
+## On your local network
+
+With Docker, from a clone of this repository:
+
+~~~bash
+echo AMBIVOX_HOST=192.168.1.20 > .env    # this machine's address on your network
+docker compose up
+~~~
+
+On macOS, `ipconfig getifaddr en0` prints that address; on Linux,
+`hostname -I`. Then open `https://192.168.1.20:8443` on any phone or computer
+connected to the same network. The certificate is generated on the spot, so
+each browser asks once whether to trust it. Choose **Start a call**, and send
+the invitation link to the other person.
+
+Invitation links expire after 24 hours. To decide who may start calls at all,
+add `AMBIVOX_ACCESS_KEY=…` to `.env`. Everything about this setup, without
+Docker too, is in [docs/OPERATIONS.md](docs/OPERATIONS.md#on-a-local-network).
+
+## Quick start from source
 
 Requirements: Rust 1.88+, Go 1.24+, CMake 3.16+ (3.28+ for the real backend) and a
 C++17 compiler.
@@ -52,6 +73,7 @@ C++17 compiler.
 ```bash
 make check    # format, lint, unit tests, and a full call end to end
 make run      # start the media engine and the server on http://127.0.0.1:8080
+make lan      # the same over HTTPS, reachable from other devices on the network
 ```
 
 `make run` uses the **simulated backend**, which needs no model: it "speaks"
@@ -70,9 +92,17 @@ scripts/setup-sussurro.sh              # downloads the runtime and several GB of
 make run BACKEND=sussurro MODELS=models
 ```
 
-Open `http://127.0.0.1:8080` in two browser tabs (or on two machines, see
-[docs/OPERATIONS.md](docs/OPERATIONS.md)), choose the same room and two
-different languages, and talk.
+Open `http://127.0.0.1:8080`, start a call, open the invitation link in a
+second tab (or on another device, with `make lan`), choose two different
+languages, and talk.
+
+With Docker, download the models on the host and start the real backend with
+the second compose file:
+
+~~~bash
+scripts/setup-sussurro.sh voices whisper translation
+docker compose -f compose.yaml -f compose.sussurro.yaml up --build
+~~~
 
 If you already have a sussurro.cpp checkout with its models, point ambivox at
 it instead of downloading again:
@@ -92,10 +122,11 @@ make run BACKEND=sussurro MODELS=/path/to/sussurro.cpp/models
 | `make test-rust` | Assembly kernels against the scalar reference (with and without the `asm` feature), resampler, voice detection, Opus wrapper, wire protocol, pipeline ordering, loss handling, pacing. |
 | `make test-go` | Wire protocol against the same vectors as Rust, engine link and reconnection, rooms, signalling, HTTP endpoints, with real WebRTC connections and the race detector on. |
 | `make e2e` | Two WebRTC participants, the Go server and the real `ambivox-media` binary: a spoken phrase goes in, live captions grow while it is spoken, and its translation comes out as audio and final captions. |
-| `make browser-check` | The same call from two headless Chrome tabs running the actual web client (needs Chrome and Node.js; not part of `make check`). |
+| `make offline` | The end-to-end calls again, inside a network namespace with nothing but loopback (Linux). It fails if any other interface is up, so a pass shows that a call needs no network beyond the machine. |
+| `make browser-check` | A call started from the actual web client in headless Chrome over self-signed HTTPS: access key, invitation link, a forged link refused, translated captions on both sides (needs Chrome and Node.js; not part of `make check`). |
 
 Continuous integration runs `make check` on Linux x86-64 and macOS arm64, so
-both assembly back ends are exercised. The model-backed path is compiled but
+both assembly back ends are exercised, and `make offline` on Linux. The model-backed path is compiled but
 not run in CI because of the size of the models.
 
 ## Layout
@@ -109,15 +140,23 @@ server/            Go: ambivox, the WebRTC server, plus the embedded web client
 testdata/          Protocol vectors shared by the Rust and Go test suites
 docs/              Architecture, wire protocol, operations
 scripts/           Model setup and the headless browser check
+compose.yaml       The two services, media engine and server, for Docker
 ```
 
 ## Limits worth knowing
 
-- A room holds two participants.
+- A room holds two participants, and only people holding its invitation link
+  can join.
+- Nothing is kept: no accounts, no recordings, no transcripts. See
+  [docs/OPERATIONS.md](docs/OPERATIONS.md#privacy).
 - Captions are written live while someone speaks; the translated voice follows
   once the speaker pauses, typically one to three seconds later depending on
   hardware.
 - When both participants pick the same language the audio is relayed untouched.
+- While your translation is playing to the other person, your microphone is
+  silenced, so two devices in the same room cannot feed each other's voice
+  back in a loop. Wait for it to finish before going on, or turn this off with
+  `-echo-guard=false` if both of you wear headphones.
 - The assembly kernels cover x86-64 and AArch64; other targets use the scalar
   Rust implementation (`--no-default-features` forces it anywhere).
 
@@ -125,7 +164,7 @@ scripts/           Model setup and the headless browser check
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how audio flows and why it is built this way
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) — the server ↔ media engine wire format and the signalling messages
-- [docs/OPERATIONS.md](docs/OPERATIONS.md) — configuration, deployment, metrics, troubleshooting
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — local network setup, privacy, configuration, reverse proxies, metrics, troubleshooting
 
 ## License
 

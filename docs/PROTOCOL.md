@@ -68,20 +68,22 @@ same origin as the page unless the server was started with `-allow-origin`.
 ### Client → server
 
 ```json
-{"type": "join", "room": "kitchen-table", "lang": "fr", "name": "Em"}
+{"type": "join", "room": "3f9c…", "lang": "fr", "name": "Em", "token": "tqk2a8.Jdy…"}
 {"type": "offer", "sdp": "…"}
 {"type": "leave"}
 ```
 
 `join` must be the first message and arrive within ten seconds. Room names are
 1–64 characters from `A-Z a-z 0-9 _ -`. `lang` is one of `en`, `fr`, `es`, `it`.
+`token` is the invitation for that room; it is ignored when the server runs
+with `-open-rooms`.
 The offer carries one `sendrecv` audio section with all ICE candidates already
 gathered; there is exactly one offer per session.
 
 ### Server → client
 
 ```json
-{"type": "joined", "id": "9f2c…", "room": "kitchen-table", "lang": "fr", "name": "Em",
+{"type": "joined", "id": "9f2c…", "room": "3f9c…", "lang": "fr", "name": "Em",
  "connected": true, "backend": "sussurro", "languages": ["en", "fr", "es", "it"],
  "peer": {"id": "41aa…", "name": "Bob", "lang": "en"},
  "iceServers": [{"urls": ["stun:stun.example.org:3478"]}]}
@@ -101,6 +103,27 @@ to both participants; `from` is the speaker. A caption with `"final": false` is
 a live draft that the next caption for the same `from`, `utterance` and `kind`
 replaces. `media` announces that the translation engine went away or came back.
 
-A join that cannot be honoured (full room, room limit, invalid name or language)
-gets an `error` and the socket is closed with status 1008. Errors after joining
+A join that cannot be honoured (missing, forged or expired invitation, full
+room, room limit, invalid name or language) gets an `error` and the socket is closed with status 1008. Errors after joining
 leave the session open. On shutdown the server closes with status 1001.
+
+### Creating a room
+
+~~~http
+POST /rooms
+Authorization: Bearer <access key>
+~~~
+
+The header is only needed when the server has an access key; a wrong or
+missing one gets `401`. The answer is `201` with:
+
+~~~json
+{"room": "3f9c…", "token": "tqk2a8.Jdy…", "expires": "2026-11-21T09:17:44Z"}
+~~~
+
+The room is a random 32-character hexadecimal name and exists once someone
+joins it. The token is the expiry time in base 36, a dot, and the first 18
+bytes of an HMAC-SHA256 over the room and that expiry, in unpadded base64url.
+With `-open-rooms`, `token` and `expires` are absent.
+
+The web client shares the invitation as `https://host/#room=…&t=…`.

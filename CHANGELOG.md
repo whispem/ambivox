@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0
+
+- Runs on a local network with no Internet. `docker compose up` starts the
+  media engine and the server; `make lan` does the same without Docker.
+- `-tls-self-signed` serves HTTPS with a certificate generated for the
+  machine's addresses, kept in `-data-dir` and renewed when they change. The
+  server prints the addresses to open and the certificate fingerprint.
+- Rooms by invitation. Starting a call creates a random room and a signed link
+  that expires after 24 hours (`-invite-ttl`); joining without it is refused.
+  `-open-rooms` restores rooms joinable by name.
+- `AMBIVOX_ACCESS_KEY` restricts who can start a call.
+- `-udp-port` carries every call over a single UDP port.
+- Echo guard: while a speaker's translation plays to the listener, the
+  speaker's microphone is silenced, which stops two devices in the same room
+  from translating each other's loudspeaker in a loop (`-echo-guard`, on by
+  default). New metric `ambivox_rtp_packets_muted_total`.
+- New endpoint `POST /rooms`; `join` carries a `token`; `/config` reports
+  `inviteOnly` and `accessKey`.
+- `make offline` runs complete calls in a network namespace with only
+  loopback, in CI on Linux.
+- The web client starts calls and shares invitation links instead of asking for
+  a room name.
+- `scripts/setup-sussurro.sh` supports Linux on arm64.
+- Documentation: local network setup, privacy, running behind your own reverse
+  proxy.
+
 ## 0.2.0
 
 - Live captions. While someone speaks, both participants see the sentence being

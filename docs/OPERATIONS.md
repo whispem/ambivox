@@ -15,6 +15,158 @@ ambivox -listen :8080 -media-socket /run/ambivox/media.sock
 clear message if the model directory or the whisper model is missing.
 Translation models and voices load the first time a language pair needs them.
 
+## On a local network
+
+ambivox is built to run on a network that has no Internet access: a home
+Wi-Fi, a hotspot from a phone, a router with no uplink. Nothing in a call
+leaves the machine that runs it, and the only thing a browser needs is to reach
+that machine.
+
+### With Docker
+
+~~~bash
+echo AMBIVOX_HOST=192.168.1.20 > .env
+docker compose up
+~~~
+
+`AMBIVOX_HOST` must be the IP address the other devices use to reach this
+machine. The server puts it in its certificate and advertises it as the media
+address, since the address the container sees is not reachable from outside.
+Keeping it in `.env` lets later commands (`docker compose down`, `logs`) find
+it too. Port 8443 is published for both TCP (the page and signalling) and UDP
+(all the audio of every call).
+
+Two named volumes hold the state: `socket` for the Unix socket between the two
+services, and `data` for the certificate and the invitation key, so that
+browsers keep trusting the server and links keep working across restarts.
+
+The image builds with the simulated backend by default. For real speech, put
+the models in `./models` (or point `AMBIVOX_MODELS` at them) and add the
+second file: `docker compose -f compose.yaml -f compose.sussurro.yaml up
+--build`. The image then carries sherpa-onnx for the build platform; x86-64
+and arm64 are supported, so Apple silicon runs it natively.
+
+Other settings from the table below can go in `.env` and be passed through
+`compose.yaml` the same way as `AMBIVOX_ACCESS_KEY` and `AMBIVOX_INVITE_TTL`.
+
+### Without Docker
+
+`make lan` starts both processes with the settings below. By hand:
+
+~~~bash
+ambivox-media serve --socket /tmp/ambivox-media.sock
+ambivox -listen :8443 -tls-self-signed -udp-port 8443 -data-dir ~/.ambivox
+~~~
+
+The server prints the addresses to open, for instance:
+
+~~~text
+ambivox 0.3.0 is ready. Open this on any device on the same network:
+  https://192.168.1.20:8443
+  https://localhost:8443
+The certificate is self-signed: each browser asks once to trust it. Its fingerprint is
+  SHA-256 A8:50:05:60:…
+~~~
+
+It lists the IPv4 addresses of every interface that is up; `-host` replaces
+that list with your own addresses or names. A firewall must let TCP and UDP
+8443 in; macOS asks the first time.
+
+### The certificate warning
+
+Browsers only give a page the microphone over HTTPS, and no public authority
+can vouch for an address on a private network, so ambivox signs its own
+certificate. The first visit shows a warning: on Chrome choose *Advanced*,
+then *Proceed*; on Safari, *Show Details*, then *visit this website*. To be
+sure you are talking to your own server, compare the fingerprint the browser
+shows with the one the server printed.
+
+The certificate is valid for a little over a year and covers `localhost`, the
+listed addresses and the `-host` names. It is renewed by itself when it nears
+expiry or when the machine's address changes, which means one more warning:
+giving the machine a fixed address in the router avoids that.
+
+### Invitations and the access key
+
+Starting a call creates a room with a random 128-bit name and an invitation
+signed with HMAC-SHA256: the link carries the room, an expiry time and the
+signature. A join without a valid, unexpired signature for that room is
+refused. Links last 24 hours (`-invite-ttl`). The link puts both in the URL
+fragment (`#room=…&t=…`), which browsers never send in HTTP requests, so it
+does not end up in access logs.
+
+The signing key is `invite.key` in the data directory. Deleting it and
+restarting the server revokes every link handed out so far. Without a data
+directory the key only lives in memory and links stop working when the server
+restarts.
+
+Anyone who can open the page can start a call. To restrict that, set
+`AMBIVOX_ACCESS_KEY`: the page then asks for it before creating a room. Joining
+with an invitation never needs it. The key is read from the environment only,
+so it does not show up in the process list.
+
+`-open-rooms` turns invitations off and goes back to rooms that anyone can join
+by name, `https://host/#room=kitchen`.
+
+## Privacy
+
+Nothing is kept. There are no accounts and no database. Audio, transcripts and
+translations exist in memory for as long as a sentence is being processed and
+are never written to disk. Names and languages live as long as the call.
+
+- **Logs** record that a participant joined or left a room, with random
+  identifiers and the language, never a name, a caption or audio.
+- **The data directory** holds the certificate, its private key and the
+  invitation key. Nothing else.
+- **Metrics** are counters and gauges with no labels.
+- **The browser** stores nothing: no cookies, no local storage. The page loads
+  no outside resources, and its Content-Security-Policy forbids them.
+- **No network.** The models are downloaded once, at setup. After that the
+  media engine and the server never open a connection beyond the machine;
+  `make offline` runs complete calls in a network namespace that only has
+  loopback, and fails if it finds any other interface.
+
+The one exception is a STUN or TURN server you configure with `-ice-servers`:
+browsers then contact it to find a route, and a TURN server relays the
+encrypted audio.
+
+## Behind your own reverse proxy
+
+If ambivox should share a machine and a certificate with other services, let a
+reverse proxy you already run terminate TLS and forward to ambivox in plain
+HTTP on loopback:
+
+~~~bash
+ambivox -listen 127.0.0.1:8080 -udp-port 8443 -data-dir /var/lib/ambivox
+~~~
+
+The proxy has to forward WebSocket upgrades on `/ws`. With Caddy:
+
+~~~text
+ambivox.example.lan {
+    reverse_proxy 127.0.0.1:8080
+}
+~~~
+
+With nginx:
+
+~~~nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 1h;
+}
+~~~
+
+Audio does not go through the proxy: it is UDP straight between each browser
+and ambivox, so open the `-udp-port` in the firewall. If browsers reach the
+machine through an address it does not own itself (a NAT, a container), give
+that address with `-public-ip`. The page and the WebSocket must keep the same origin;
+otherwise list the page's origin in `-allow-origin`.
+
 ## Configuration
 
 ### ambivox (server)
@@ -28,10 +180,18 @@ Every flag has an environment variable; flags win.
 | `-max-rooms` | `AMBIVOX_MAX_ROOMS` | `100` | simultaneous rooms |
 | `-ice-servers` | `AMBIVOX_ICE_SERVERS` | none | STUN/TURN URLs given to both ends |
 | `-public-ip` | `AMBIVOX_PUBLIC_IP` | none | address to advertise behind 1:1 NAT |
-| `-udp-ports` | `AMBIVOX_UDP_PORTS` | any | UDP range for media, `MIN-MAX` |
+| `-udp-port` | `AMBIVOX_UDP_PORT` | none | one UDP port shared by every call |
+| `-udp-ports` | `AMBIVOX_UDP_PORTS` | any | UDP range for media, `MIN-MAX`, instead of `-udp-port` |
 | `-ice-loopback` | `AMBIVOX_ICE_LOOPBACK=1` | off | offer loopback candidates |
 | `-allow-origin` | `AMBIVOX_ALLOW_ORIGIN` | same origin | extra WebSocket origins |
-| `-tls-cert`, `-tls-key` | `AMBIVOX_TLS_CERT`, `AMBIVOX_TLS_KEY` | none | serve HTTPS directly |
+| `-tls-cert`, `-tls-key` | `AMBIVOX_TLS_CERT`, `AMBIVOX_TLS_KEY` | none | serve HTTPS with your own certificate |
+| `-tls-self-signed` | `AMBIVOX_TLS_SELF_SIGNED=1` | off | serve HTTPS with a generated certificate |
+| `-host` | `AMBIVOX_HOST` | interface addresses | addresses or names put in the certificate and printed at start-up |
+| `-data-dir` | `AMBIVOX_DATA_DIR` | none | keeps the certificate and invitation key across restarts |
+| `-invite-ttl` | `AMBIVOX_INVITE_TTL` | `24h` | how long an invitation link works |
+| `-open-rooms` | `AMBIVOX_OPEN_ROOMS=1` | off | rooms joinable by name, without invitations |
+| | `AMBIVOX_ACCESS_KEY` | none | key required to start a call |
+| `-echo-guard` | `AMBIVOX_ECHO_GUARD=0` disables | on | silence a speaker while their translation plays |
 | `-log-level` | `AMBIVOX_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `-log-format` | `AMBIVOX_LOG_FORMAT` | `text` | `text` or `json` |
 
@@ -70,10 +230,11 @@ uses, plus the whisper model.
 ## Network
 
 - Browsers only grant microphone access on `https://` or `localhost`. For
-  anything beyond one machine, put the server behind a TLS-terminating proxy
-  that supports WebSockets, or use `-tls-cert`/`-tls-key`.
+  anything beyond one machine, use `-tls-self-signed`, your own certificate
+  with `-tls-cert`/`-tls-key`, or a reverse proxy.
 - Signalling is HTTP and WebSocket on the listen port. Media is UDP directly
-  between each browser and the server; open the range given by `-udp-ports`.
+  between each browser and the server; open `-udp-port` (or the range given by
+  `-udp-ports`).
 - On a LAN no ICE server is needed. On a host with a public address behind 1:1
   NAT (most cloud instances) set `-public-ip`. Participants behind restrictive
   NATs need a TURN server listed in `-ice-servers`.
@@ -86,9 +247,10 @@ uses, plus the whisper model.
 |---|---|
 | `/` | web client |
 | `/ws` | signalling WebSocket |
+| `POST /rooms` | creates a room and its invitation |
 | `/healthz` | liveness: `200` while the process serves HTTP |
 | `/readyz` | readiness: `503` while the media engine is unreachable |
-| `/config` | languages, backend name and engine link state as JSON |
+| `/config` | languages, backend name, engine link state and whether invitations and an access key are required, as JSON |
 | `/metrics` | Prometheus text format |
 
 ## Metrics
@@ -104,6 +266,7 @@ Server:
 | `ambivox_rtp_packets_received_total` | counter | packets from participants |
 | `ambivox_rtp_packets_relayed_total` | counter | packets relayed untouched (same language) |
 | `ambivox_rtp_packets_translated_total` | counter | packets sent to the engine |
+| `ambivox_rtp_packets_muted_total` | counter | packets silenced by the echo guard |
 | `ambivox_speech_packets_sent_total` | counter | translated packets sent to participants |
 | `ambivox_captions_total` | counter | final captions delivered |
 | `ambivox_partial_captions_total` | counter | live caption updates delivered |
@@ -124,9 +287,28 @@ average time to interpret one utterance.
 socket. Check that `ambivox-media` is running and that both sides use the same
 path.
 
-**Connected, but no audio and no captions.** Media is not arriving. Check the
-UDP range and, across NAT, `-public-ip` or a TURN server. `-log-level debug`
-shows ICE state changes.
+**Connected, but no audio and no captions.** Media is not arriving. Check that
+UDP reaches `-udp-port` (or the range), and in Docker that `AMBIVOX_HOST` is
+the address the other devices use. Across NAT, set `-public-ip` or use a TURN
+server. `-log-level debug` shows ICE state changes.
+
+**The same sentence comes back again and again, more garbled each time.** Two
+devices in one room, without headphones: one plays the translation, the other
+hears it and sends it to be translated again. The echo guard stops this; make
+sure it has not been turned off with `-echo-guard=false`.
+
+**The beginning of a sentence is lost.** It was said while the previous
+translation was still playing, so the echo guard silenced it. Wait for the
+translation to finish, or, with headphones on both sides, use
+`-echo-guard=false`.
+
+**"This invitation link has expired" or "is not valid".** Start a new call and
+send the new link. Links also stop working when the invitation key changes:
+after deleting it, or after a restart without a data directory.
+
+**The phone shows a certificate warning again.** The machine's address
+changed, so the certificate was renewed. Give it a fixed address in the
+router.
 
 **Captions appear late.** Look at `ambivox_engine_inference_ms` against
 `ambivox_engine_utterances`. Raise `--threads`, or use quantised translation

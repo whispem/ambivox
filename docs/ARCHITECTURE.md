@@ -121,6 +121,18 @@ dependencies stay out of the Rust link line.
   told, their streams are reopened when it returns, and the WebRTC sessions stay
   up throughout.
 - **Same-language calls** never touch the engine.
+- **Invitations.** A room only lets in people who present a token signed by
+  the server for that room, and the token expires. The server keeps no list of
+  rooms or links: the signature is the whole record.
+- **Echo guard.** While the listener hears a translation, the speaker's
+  microphone may pick it up from the listener's loudspeaker, and the engine
+  would translate it back. Until that speech has played, plus 600 ms for
+  buffering, the speaker's packets are replaced by Opus silence before they
+  reach the engine. Browsers cancel the echo of their own loudspeaker; this
+  covers the one next to them.
+- **One UDP port.** With `-udp-port`, every call shares a single socket and
+  ICE tells the connections apart, so a firewall or a container needs one port
+  opened instead of a range.
 
 ## What is deliberately simple
 
