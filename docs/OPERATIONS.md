@@ -26,6 +26,7 @@ that machine.
 
 ~~~bash
 echo AMBIVOX_HOST=192.168.1.20 > .env
+docker compose run --rm models
 docker compose up
 ~~~
 
@@ -36,18 +37,36 @@ Keeping it in `.env` lets later commands (`docker compose down`, `logs`) find
 it too. Port 8443 is published for both TCP (the page and signalling) and UDP
 (all the audio of every call).
 
-Two named volumes hold the state: `socket` for the Unix socket between the two
-services, and `data` for the certificate and the invitation key, so that
-browsers keep trusting the server and links keep working across restarts.
+Three named volumes hold the state: `socket` for the Unix socket between the
+two services, `data` for the certificate and the invitation key, so that
+browsers keep trusting the server and links keep working across restarts, and
+`models` for the speech models.
 
-The image builds with the simulated backend by default. For real speech, put
-the models in `./models` (or point `AMBIVOX_MODELS` at them) and add the
-second file: `docker compose -f compose.yaml -f compose.sussurro.yaml up
---build`. The image then carries sherpa-onnx for the build platform; x86-64
-and arm64 are supported, so Apple silicon runs it natively.
+`docker compose run --rm models` fills that last volume. It runs
+`scripts/setup-sussurro.sh` in its own image, which carries Python and the
+converter for the translation models, so nothing gets installed on the
+machine. It can be run again: whatever is already there is skipped. Until the
+models are in place, the media engine stops at start-up with a message saying
+which file is missing. To use a model directory that already exists on the
+machine instead, set `AMBIVOX_MODELS=./models` in `.env`.
 
-Other settings from the table below can go in `.env` and be passed through
-`compose.yaml` the same way as `AMBIVOX_ACCESS_KEY` and `AMBIVOX_INVITE_TTL`.
+The images come from `ghcr.io/whispem/ambivox`, built for x86-64 and arm64 at
+every release: `0.4` (and `latest`) for ambivox itself, `0.4-models` for the
+model setup. `AMBIVOX_VERSION` picks another release. To build them from the
+sources instead, add the second compose file:
+
+~~~bash
+docker compose -f compose.yaml -f compose.build.yaml run --rm --build models
+docker compose -f compose.yaml -f compose.build.yaml up --build
+~~~
+
+Each image holds the licences of what it was built from in
+`/usr/share/licenses/ambivox`.
+
+`AMBIVOX_ACCESS_KEY`, `AMBIVOX_INVITE_TTL` and `AMBIVOX_ECHO_GUARD` can go in
+`.env` too; other settings from the table below are passed through
+`compose.yaml` the same way. `AMBIVOX_BACKEND=sim` runs the simulated backend,
+which needs no models.
 
 ### Without Docker
 
@@ -61,7 +80,7 @@ ambivox -listen :8443 -tls-self-signed -udp-port 8443 -data-dir ~/.ambivox
 The server prints the addresses to open, for instance:
 
 ~~~text
-ambivox 0.3.0 is ready. Open this on any device on the same network:
+ambivox 0.4.0 is ready. Open this on any device on the same network:
   https://192.168.1.20:8443
   https://localhost:8443
 The certificate is self-signed: each browser asks once to trust it. Its fingerprint is

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0
+
+- Ready-made images. Every release publishes `ghcr.io/whispem/ambivox` for
+  x86-64 and arm64, so `docker compose up` downloads ambivox instead of
+  compiling it. The image runs the real speech backend by default and also
+  carries the simulated one (`AMBIVOX_BACKEND=sim`).
+- `docker compose run --rm models` downloads and prepares the speech models in
+  a volume, with nothing to install on the machine.
+- The images carry the licences of everything compiled into them.
+- `compose.build.yaml` builds the images from the sources;
+  `compose.sussurro.yaml` is gone.
+- `scripts/setup-sussurro.sh` gains a `converter` step and can use an existing
+  Python (`AMBIVOX_CONVERT_PYTHON`).
+
 ## 0.3.0
 
 - Runs on a local network with no Internet. `docker compose up` starts the

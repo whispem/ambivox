@@ -48,12 +48,18 @@ Each one sits on a real boundary:
 
 ## On your local network
 
-With Docker, from a clone of this repository:
+All it takes is Docker and the `compose.yaml` file from this repository:
 
 ~~~bash
+curl -fsSLO https://raw.githubusercontent.com/whispem/ambivox/main/compose.yaml
 echo AMBIVOX_HOST=192.168.1.20 > .env    # this machine's address on your network
+docker compose run --rm models           # once: downloads and prepares the models
 docker compose up
 ~~~
+
+Nothing is compiled: ready-made images for x86-64 and arm64 are published with
+every release. Preparing the models downloads a few gigabytes and takes a
+while, but only the first time; after that ambivox needs no Internet at all.
 
 On macOS, `ipconfig getifaddr en0` prints that address; on Linux,
 `hostname -I`. Then open `https://192.168.1.20:8443` on any phone or computer
@@ -96,13 +102,9 @@ Open `http://127.0.0.1:8080`, start a call, open the invitation link in a
 second tab (or on another device, with `make lan`), choose two different
 languages, and talk.
 
-With Docker, download the models on the host and start the real backend with
-the second compose file:
-
-~~~bash
-scripts/setup-sussurro.sh voices whisper translation
-docker compose -f compose.yaml -f compose.sussurro.yaml up --build
-~~~
+Docker uses this backend by default, with the models prepared by
+`docker compose run --rm models`. `AMBIVOX_BACKEND=sim docker compose up`
+starts the simulated one instead.
 
 If you already have a sussurro.cpp checkout with its models, point ambivox at
 it instead of downloading again:
@@ -127,7 +129,9 @@ make run BACKEND=sussurro MODELS=/path/to/sussurro.cpp/models
 
 Continuous integration runs `make check` on Linux x86-64 and macOS arm64, so
 both assembly back ends are exercised, and `make offline` on Linux. The model-backed path is compiled but
-not run in CI because of the size of the models.
+not run in CI because of the size of the models. Pushing a tag builds and
+publishes the Docker images; the same workflow can be started by hand to
+publish an `edge` image from any commit.
 
 ## Layout
 
@@ -140,7 +144,7 @@ server/            Go: ambivox, the WebRTC server, plus the embedded web client
 testdata/          Protocol vectors shared by the Rust and Go test suites
 docs/              Architecture, wire protocol, operations
 scripts/           Model setup and the headless browser check
-compose.yaml       The two services, media engine and server, for Docker
+compose.yaml       The media engine and the server for Docker, plus the model setup
 ```
 
 ## Limits worth knowing
