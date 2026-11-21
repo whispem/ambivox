@@ -12,7 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODELS="${AMBIVOX_MODELS:-$ROOT/models}"
 THIRD_PARTY="$ROOT/third_party"
-SHERPA_VERSION="v1.13.3"
+SHERPA_VERSION="v1.13.8"
 SUSSURRO_REV="298a657fc8710db844e0b82925b9e454b456fa81"
 VOICES=(en_US-ryan-medium fr_FR-tom-medium es_ES-davefx-medium it_IT-paola-medium)
 TRANSLATION_MODELS=(

@@ -3,6 +3,7 @@ project(ambivox_engine LANGUAGES C CXX)
 
 option(AMBIVOX_BACKEND_SUSSURRO "Build the whisper.cpp + sussurro.cpp + sherpa-onnx backend" OFF)
 option(AMBIVOX_BUILD_TESTS "Build the engine tests" ON)
+option(AMBIVOX_PORTABLE "Run on any CPU of the target architecture, not only the build machine's" OFF)
 set(AMBIVOX_SHERPA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/sherpa-onnx" CACHE PATH
     "Prebuilt sherpa-onnx C API (include/ and lib/)")
 set(AMBIVOX_SUSSURRO_TAG "298a657fc8710db844e0b82925b9e454b456fa81" CACHE STRING
@@ -26,6 +27,17 @@ if(AMBIVOX_BACKEND_SUSSURRO)
     if(NOT EXISTS "${AMBIVOX_SHERPA_DIR}/include/sherpa-onnx/c-api/c-api.h")
         message(FATAL_ERROR
             "sherpa-onnx not found in ${AMBIVOX_SHERPA_DIR}; run scripts/setup-sussurro.sh first")
+    endif()
+
+    if(AMBIVOX_PORTABLE)
+        set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+            set(GGML_CPU_ARM_ARCH "armv8.2-a+dotprod+fp16" CACHE STRING "" FORCE)
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+            foreach(feature SSE42 AVX AVX2 BMI2 FMA F16C)
+                set(GGML_${feature} ON CACHE BOOL "" FORCE)
+            endforeach()
+        endif()
     endif()
 
     include(FetchContent)

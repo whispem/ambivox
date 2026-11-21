@@ -23,11 +23,11 @@ case "$part" in
   media)
     keep ambivox "$ROOT/LICENSE"
     registry="${CARGO_HOME:-$HOME/.cargo}/registry/src"
-    for crate in log opus audiopus_sys; do
-      version="$(grep -A1 "^name = \"$crate\"$" "$ROOT/Cargo.lock" | sed -n 's/^version = "\(.*\)"/\1/p')"
+    for crate in opus opusic-sys; do
+      version="$(grep -A1 "^name = \"$crate\"$" "$ROOT/Cargo.lock" | sed -n 's/^version = "\(.*\)"/\1/p' || true)"
       keep "$crate" "$registry"/*/"$crate-$version"/LICENSE* "$registry"/*/"$crate-$version"/COPYING*
     done
-    keep libopus "$registry"/*/audiopus_sys-*/opus/COPYING
+    keep libopus "$registry"/*/opusic-sys-*/opus/COPYING
     for file in "$ROOT"/target/release/build/ambivox-engine{-*,/*}/out/build/_deps/*-src/LICENSE \
                 "$ROOT"/target/release/build/ambivox-engine{-*,/*}/out/build/_deps/*-src/third_party/*/LICENSE; do
       [ -f "$file" ] || continue

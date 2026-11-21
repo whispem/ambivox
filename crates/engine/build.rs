@@ -10,6 +10,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", source.join(dir).display());
     }
     println!("cargo:rerun-if-env-changed=AMBIVOX_SHERPA_DIR");
+    println!("cargo:rerun-if-env-changed=AMBIVOX_PORTABLE");
 
     let mut config = cmake::Config::new(&source);
     config.profile("Release").define("AMBIVOX_BUILD_TESTS", "OFF");
@@ -17,6 +18,9 @@ fn main() {
         config.define("AMBIVOX_BACKEND_SUSSURRO", "ON");
         if let Some(dir) = env::var_os("AMBIVOX_SHERPA_DIR") {
             config.define("AMBIVOX_SHERPA_DIR", dir);
+        }
+        if env::var_os("AMBIVOX_PORTABLE").is_some_and(|v| v == "1") {
+            config.define("AMBIVOX_PORTABLE", "ON");
         }
     }
     let lib = config.build().join("lib");

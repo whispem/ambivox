@@ -14,7 +14,7 @@ COPY scripts/licenses scripts/licenses
 RUN scripts/setup-sussurro.sh sherpa
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     set -eu; \
-    cargo build --release --locked -p ambivox-media --features sussurro; \
+    AMBIVOX_PORTABLE=1 cargo build --release --locked -p ambivox-media --features sussurro; \
     mkdir -p /out/bin /out/lib; \
     cp target/release/ambivox-media /out/bin/; \
     cp -L "$(find target/release/build -path '*/out/lib/libambivox_engine.so' -print -quit)" /out/lib/; \
@@ -30,7 +30,7 @@ COPY scripts/collect-licenses.sh /src/scripts/
 RUN CGO_ENABLED=0 go build -trimpath -o /out/bin/ambivox ./cmd/ambivox \
  && /src/scripts/collect-licenses.sh server /out/licenses
 
-FROM python:3.12-slim-trixie AS models
+FROM python:3.13-slim-trixie AS models
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bzip2 ca-certificates curl git \
  && rm -rf /var/lib/apt/lists/*

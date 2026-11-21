@@ -16,7 +16,7 @@ sussurro = ["ambivox-engine/sussurro"]
 [dependencies]
 ambivox-dsp = { path = "../dsp", default-features = false }
 ambivox-engine = { path = "../engine" }
-opus = "0.3"
+opus = "0.4"
 
 [[bin]]
 name = "ambivox-media"
