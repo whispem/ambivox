@@ -73,7 +73,7 @@ Docker too, is in [docs/OPERATIONS.md](docs/OPERATIONS.md#on-a-local-network).
 
 ## Quick start from source
 
-Requirements: Rust 1.88+, Go 1.24+, CMake 3.16+ (3.28+ for the real backend) and a
+Requirements: Rust 1.88+, Go 1.26+, CMake 3.16+ (3.28+ for the real backend) and a
 C++17 compiler.
 
 ```bash

@@ -51,7 +51,7 @@ which file is missing. To use a model directory that already exists on the
 machine instead, set `AMBIVOX_MODELS=./models` in `.env`.
 
 The images come from `ghcr.io/whispem/ambivox`, built for x86-64 and arm64 at
-every release: `0.4` (and `latest`) for ambivox itself, `0.4-models` for the
+every release: `0.5` (and `latest`) for ambivox itself, `0.5-models` for the
 model setup. `AMBIVOX_VERSION` picks another release. To build them from the
 sources instead, add the second compose file:
 
@@ -60,7 +60,12 @@ docker compose -f compose.yaml -f compose.build.yaml run --rm --build models
 docker compose -f compose.yaml -f compose.build.yaml up --build
 ~~~
 
-Each image holds the licences of what it was built from in
+The images run on any x86-64 CPU with AVX2, from 2013 onwards, and on any
+arm64 CPU with ARMv8.2 dot product and half-precision instructions: Apple
+silicon, Raspberry Pi 5, AWS Graviton. A build from the sources is tuned for
+the machine that compiles it instead, which is a little faster there but may
+not start elsewhere; set `AMBIVOX_PORTABLE=1` when building binaries to copy
+to other machines. Each image holds the licences of what it was built from in
 `/usr/share/licenses/ambivox`.
 
 `AMBIVOX_ACCESS_KEY`, `AMBIVOX_INVITE_TTL` and `AMBIVOX_ECHO_GUARD` can go in
@@ -80,7 +85,7 @@ ambivox -listen :8443 -tls-self-signed -udp-port 8443 -data-dir ~/.ambivox
 The server prints the addresses to open, for instance:
 
 ~~~text
-ambivox 0.4.0 is ready. Open this on any device on the same network:
+ambivox 0.5.0 is ready. Open this on any device on the same network:
   https://192.168.1.20:8443
   https://localhost:8443
 The certificate is self-signed: each browser asks once to trust it. Its fingerprint is

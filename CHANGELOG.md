@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0
+
+- The server needs Go 1.26 or later; Go 1.24 is no longer supported upstream.
+  Its dependencies move to their latest releases: Pion WebRTC 4.2.28, ICE
+  4.4.9, DTLS 3.1.16 and the `golang.org/x` packages.
+- Opus moves to libopus 1.6.1, through the `opus` 0.4 crate.
+- sherpa-onnx moves to 1.13.8.
+- The server code uses current Go idioms (`go fix`).
+- CI tests with the latest stable Go, and the workflows use the current major
+  versions of their actions.
+- The model setup image runs Python 3.13.
+- Fixed: the published 0.4 images stopped at start-up with an illegal
+  instruction on most machines, because whisper.cpp was tuned for the CPU of
+  the machine that built them. `AMBIVOX_PORTABLE=1` now builds the engine for
+  the whole architecture, and the images use it: any x86-64 CPU with AVX2
+  (2013 onwards) and any arm64 CPU with ARMv8.2 dot product and half-precision
+  instructions, such as Apple silicon, Raspberry Pi 5 or AWS Graviton.
+
 ## 0.4.0
 
 - Ready-made images. Every release publishes `ghcr.io/whispem/ambivox` for
