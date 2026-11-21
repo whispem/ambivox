@@ -51,9 +51,7 @@ func (e *Engine) Listen() error {
 	e.mu.Lock()
 	e.listener = listener
 	e.mu.Unlock()
-	e.wg.Add(1)
-	go func() {
-		defer e.wg.Done()
+	e.wg.Go(func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -62,13 +60,11 @@ func (e *Engine) Listen() error {
 			e.mu.Lock()
 			e.conns[conn] = struct{}{}
 			e.mu.Unlock()
-			e.wg.Add(1)
-			go func() {
-				defer e.wg.Done()
+			e.wg.Go(func() {
 				e.serve(conn)
-			}()
+			})
 		}
-	}()
+	})
 	return nil
 }
 

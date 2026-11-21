@@ -40,14 +40,12 @@ ambivox_media_b 1.5
 func TestCountersAreSafeForConcurrentUse(t *testing.T) {
 	c := NewRegistry().Counter("n", "n")
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 1000; j++ {
+	for range 8 {
+		wg.Go(func() {
+			for range 1000 {
 				c.Inc()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if c.Value() != 8000 {

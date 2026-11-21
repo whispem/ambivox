@@ -28,7 +28,7 @@ import (
 	"github.com/whispem/ambivox/server/web"
 )
 
-var version = "0.4.0"
+var version = "0.5.0"
 
 type options struct {
 	listen      string
@@ -121,7 +121,7 @@ func parseFlags(args []string) (options, error) {
 
 func splitList(s string) []string {
 	var out []string
-	for _, item := range strings.Split(s, ",") {
+	for item := range strings.SplitSeq(s, ",") {
 		if item = strings.TrimSpace(item); item != "" {
 			out = append(out, item)
 		}

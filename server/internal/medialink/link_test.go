@@ -94,7 +94,7 @@ func TestStreamLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		stream.Write(uint16(i), []byte{byte(i), 0xaa})
 	}
 	stream.Close()
