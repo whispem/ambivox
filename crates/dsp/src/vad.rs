@@ -12,6 +12,7 @@ pub struct SegmenterConfig {
     pub hangover_ms: u32,
     pub pre_roll_ms: u32,
     pub min_utterance_ms: u32,
+    pub min_pitched_ms: u32,
     pub max_utterance_ms: u32,
 }
 
@@ -26,6 +27,7 @@ impl Default for SegmenterConfig {
             hangover_ms: 600,
             pre_roll_ms: 300,
             min_utterance_ms: 200,
+            min_pitched_ms: 60,
             max_utterance_ms: 15_000,
         }
     }
@@ -37,6 +39,44 @@ const FLOOR_FALL: f32 = 0.2;
 const FLOOR_RISE: f32 = 0.02;
 const FLOOR_CREEP_DB: f32 = 0.02;
 const TRAILING_MS: u32 = 200;
+const PITCH_MIN_HZ: u32 = 70;
+const PITCH_MAX_HZ: u32 = 400;
+const PITCH_CORRELATION: f32 = 0.6;
+const PITCH_DIP: f32 = 0.4;
+
+// A voice is periodic: the vocal folds repeat every 2.5 to 14 ms. A knock, a
+// door or a cough is not, and whisper turns such sounds into "thank you".
+// The frame is pitched when its autocorrelation peaks at such a lag; the peak
+// must be a real one, not the slow decay of a low rumble.
+fn pitched(window: &[f32], sample_rate: u32, squares: &mut Vec<f32>) -> bool {
+    let (min_lag, max_lag) = ((sample_rate / PITCH_MAX_HZ) as usize, (sample_rate / PITCH_MIN_HZ) as usize);
+    if window.len() <= max_lag + 1 || min_lag < 3 {
+        return false;
+    }
+    squares.clear();
+    squares.push(0.0);
+    let mut total = 0.0;
+    for x in window {
+        total += x * x;
+        squares.push(total);
+    }
+    let correlation = |lag: usize| {
+        let n = window.len() - lag;
+        let energy = squares[n] + squares[window.len()] - squares[lag];
+        if energy <= 1e-9 { 0.0 } else { 2.0 * kernels::dot(&window[..n], &window[lag..]) / energy }
+    };
+    let (mut lowest, mut before, mut here) = (f32::MAX, correlation(1), correlation(2));
+    for lag in 2..=max_lag {
+        let after = correlation(lag + 1);
+        let peak = here >= PITCH_CORRELATION && here > before && here >= after;
+        if lag >= min_lag && peak && lowest <= here - PITCH_DIP {
+            return true;
+        }
+        lowest = lowest.min(here);
+        (before, here) = (here, after);
+    }
+    false
+}
 
 pub struct Segmenter {
     config: SegmenterConfig,
@@ -48,6 +88,9 @@ pub struct Segmenter {
     speech_frames: u32,
     silence_frames: u32,
     voiced_frames: u32,
+    pitched_frames: u32,
+    window: Vec<f32>,
+    squares: Vec<f32>,
     active: bool,
 }
 
@@ -65,6 +108,9 @@ impl Segmenter {
             speech_frames: 0,
             silence_frames: 0,
             voiced_frames: 0,
+            pitched_frames: 0,
+            window: Vec::new(),
+            squares: Vec::new(),
             active: false,
         }
     }
@@ -74,7 +120,8 @@ impl Segmenter {
     }
 
     pub fn open_utterance(&self) -> Option<&[f32]> {
-        self.active.then_some(self.utterance.as_slice())
+        let heard = self.pitched_frames >= self.frames(self.config.min_pitched_ms);
+        (self.active && heard).then_some(self.utterance.as_slice())
     }
 
     pub fn noise_floor_db(&self) -> f32 {
@@ -113,6 +160,10 @@ impl Segmenter {
         let level_db = 10.0 * (kernels::energy(frame) / frame.len() as f32 + 1e-12).log10();
         let speech = level_db > self.floor_db + self.config.threshold_db && level_db > self.config.min_level_db;
         self.track_floor(level_db, speech);
+        let keep = self.window.len().saturating_sub(self.frame_len);
+        self.window.drain(..keep);
+        self.window.extend_from_slice(frame);
+        let voice = speech && pitched(&self.window, self.config.sample_rate, &mut self.squares);
 
         if !self.active {
             self.pre_roll.extend(frame);
@@ -124,6 +175,7 @@ impl Segmenter {
             if self.speech_frames >= self.frames(self.config.attack_ms) {
                 self.active = true;
                 self.voiced_frames = self.speech_frames;
+                self.pitched_frames = u32::from(voice);
                 self.silence_frames = 0;
                 self.utterance.extend(self.pre_roll.drain(..));
             }
@@ -134,6 +186,7 @@ impl Segmenter {
         if speech {
             self.silence_frames = 0;
             self.voiced_frames += 1;
+            self.pitched_frames += u32::from(voice);
         } else {
             self.silence_frames += 1;
         }
@@ -162,11 +215,13 @@ impl Segmenter {
         utterance.truncate(utterance.len() - trim.min(utterance.len()));
 
         let voiced_ms = self.voiced_frames * self.config.frame_ms;
+        let pitched_ms = self.pitched_frames * self.config.frame_ms;
         self.active = false;
         self.speech_frames = 0;
         self.silence_frames = 0;
         self.voiced_frames = 0;
-        if voiced_ms >= self.config.min_utterance_ms {
+        self.pitched_frames = 0;
+        if voiced_ms >= self.config.min_utterance_ms && pitched_ms >= self.config.min_pitched_ms {
             emit(utterance);
         }
     }
@@ -262,6 +317,50 @@ mod tests {
         audio.extend(tone(0.06, 0.5));
         audio.extend(vec![0.0; 32000]);
         assert!(run(SegmenterConfig::default(), &audio).is_empty());
+    }
+
+    fn knock(seconds: f64, amplitude: f32, smoothing: f32, seed: u64) -> Vec<f32> {
+        let mut low = 0.0;
+        let raw = noise(seconds, 1.0, seed);
+        let len = raw.len() as f32;
+        raw.iter()
+            .enumerate()
+            .map(|(i, x)| {
+                low += (1.0 - smoothing) * (x - low);
+                amplitude * low * (-4.0 * i as f32 / len).exp()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn knocks_and_rumbles_are_not_speech() {
+        for (smoothing, seed) in [0.0f32, 0.5, 0.9, 0.95, 0.98, 0.99, 0.995, 0.998]
+            .into_iter()
+            .flat_map(|s| (0..5).map(move |k| (s, 100 + k)))
+        {
+            let mut segmenter = Segmenter::new(SegmenterConfig::default());
+            let mut audio = vec![0.0; 8000];
+            let gain = 0.5 / (1.0 - smoothing).sqrt();
+            audio.extend(knock(0.6, gain, smoothing, seed));
+            let mut out = Vec::new();
+            segmenter.push(&audio, |u| out.push(u));
+            assert!(segmenter.open_utterance().is_none(), "smoothing {smoothing}: partial offered");
+            segmenter.push(&vec![0.0; 24000], |u| out.push(u));
+            assert!(out.is_empty(), "smoothing {smoothing}: {} utterances", out.len());
+        }
+    }
+
+    #[test]
+    fn low_and_high_voices_are_speech() {
+        for hz in [85.0, 120.0, 220.0, 380.0] {
+            let mut audio = vec![0.0; 8000];
+            audio.extend((0..8000).map(|i| {
+                let t = i as f32 / RATE as f32;
+                (1..=6).map(|k| 0.3 / k as f32 * (2.0 * std::f32::consts::PI * hz * k as f32 * t).sin()).sum::<f32>()
+            }));
+            audio.extend(vec![0.0; 16000]);
+            assert_eq!(run(SegmenterConfig::default(), &audio).len(), 1, "{hz} Hz");
+        }
     }
 
     #[test]

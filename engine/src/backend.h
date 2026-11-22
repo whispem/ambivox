@@ -34,7 +34,8 @@ public:
 std::unique_ptr<Backend> make_sim_backend();
 
 #ifdef AMBIVOX_WITH_SUSSURRO
-std::unique_ptr<Backend> make_sussurro_backend(const std::string & model_dir, int threads);
+std::unique_ptr<Backend> make_sussurro_backend(const std::string & model_dir, int threads,
+                                               const std::string & asr_model);
 #endif
 
 }

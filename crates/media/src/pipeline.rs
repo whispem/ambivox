@@ -19,6 +19,8 @@ const IDLE: Duration = Duration::from_millis(100);
 const STALL_GRACE: u32 = 4;
 const UTTERANCE_GAP_MS: usize = 150;
 const MIN_PARTIAL_MS: usize = 600;
+const CLAUSE_WORDS: usize = 3;
+const CHUNK_GAP_MS: usize = 80;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -27,6 +29,7 @@ pub struct Config {
     pub bitrate: i32,
     pub max_backlog_ms: usize,
     pub partial_interval_ms: usize,
+    pub early_words: usize,
     pub segmenter: SegmenterConfig,
 }
 
@@ -38,6 +41,7 @@ impl Default for Config {
             bitrate: 32_000,
             max_backlog_ms: 20_000,
             partial_interval_ms: 800,
+            early_words: 8,
             segmenter: SegmenterConfig::default(),
         }
     }
@@ -58,6 +62,7 @@ pub struct Stats {
     pub errors: AtomicU64,
     pub inference_ms: AtomicU64,
     pub partial_ms: AtomicU64,
+    pub early_chunks: AtomicU64,
 }
 
 impl Stats {
@@ -67,7 +72,7 @@ impl Stats {
                 "{{\"streams\":{},\"packets_in\":{},\"packets_lost\":{},\"packets_dropped\":{},",
                 "\"utterances\":{},\"partials\":{},\"partials_skipped\":{},\"frames_out\":{},",
                 "\"frames_dropped\":{},\"backlog_dropped_ms\":{},\"errors\":{},\"inference_ms\":{},",
-                "\"partial_ms\":{}}}"
+                "\"partial_ms\":{},\"early_chunks\":{}}}"
             ),
             self.streams.load(Ordering::Relaxed),
             self.packets_in.load(Ordering::Relaxed),
@@ -82,6 +87,7 @@ impl Stats {
             self.errors.load(Ordering::Relaxed),
             self.inference_ms.load(Ordering::Relaxed),
             self.partial_ms.load(Ordering::Relaxed),
+            self.early_chunks.load(Ordering::Relaxed),
         )
     }
 }
@@ -117,6 +123,62 @@ struct Job {
 }
 
 #[derive(Default)]
+struct Early {
+    index: u32,
+    previous: Vec<String>,
+    committed: Vec<String>,
+}
+
+impl Early {
+    fn reset(&mut self, index: u32) {
+        if self.index != index {
+            *self = Early { index, ..Early::default() };
+        }
+    }
+
+    fn advance(&mut self, heard: &str, run: usize) -> Option<String> {
+        let words: Vec<&str> = heard.split_whitespace().collect();
+        let current: Vec<String> = words.iter().map(|w| normalize(w)).collect();
+        let previous = std::mem::replace(&mut self.previous, current);
+        let done = self.committed.len();
+        if common_prefix(&self.committed, &self.previous) < done {
+            return None;
+        }
+        let agreed = common_prefix(&previous, &self.previous).min(words.len().saturating_sub(1));
+        if agreed <= done {
+            return None;
+        }
+        let clause = (done + CLAUSE_WORDS..=agreed).rev().find(|&end| ends_clause(words[end - 1]));
+        let end = clause.or((agreed - done >= run.max(1)).then_some(agreed))?;
+        self.committed = self.previous[..end].to_vec();
+        Some(words[done..end].join(" "))
+    }
+
+    fn remainder<'a>(&self, heard: &'a str) -> &'a str {
+        let mut rest = heard.trim_start();
+        for _ in 0..self.committed.len() {
+            rest = match rest.split_once(char::is_whitespace) {
+                Some((_, tail)) => tail.trim_start(),
+                None => "",
+            };
+        }
+        rest
+    }
+}
+
+fn normalize(word: &str) -> String {
+    word.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+fn common_prefix(a: &[String], b: &[String]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
+fn ends_clause(word: &str) -> bool {
+    word.ends_with([',', '.', ';', ':', '?', '!'])
+}
+
+#[derive(Default)]
 struct Playout {
     samples: VecDeque<f32>,
     pending_jobs: usize,
@@ -132,6 +194,7 @@ struct Shared {
     scheduled: AtomicBool,
     partial_pending: AtomicBool,
     last_partial: Mutex<(u32, String)>,
+    early: Option<Mutex<Early>>,
     playout: Mutex<Playout>,
     playout_changed: Condvar,
     closed: AtomicBool,
@@ -187,7 +250,14 @@ impl Pipeline {
         self.engine.backend()
     }
 
-    pub fn open(self: &Arc<Self>, id: u32, source: &str, target: &str, sink: Sink) -> Result<Stream, OpenError> {
+    pub fn open(
+        self: &Arc<Self>,
+        id: u32,
+        source: &str,
+        target: &str,
+        early: bool,
+        sink: Sink,
+    ) -> Result<Stream, OpenError> {
         for lang in [source, target] {
             if !LANGUAGES.contains(&lang) {
                 return Err(OpenError::UnsupportedLanguage(lang.to_string()));
@@ -205,6 +275,7 @@ impl Pipeline {
             scheduled: AtomicBool::new(false),
             partial_pending: AtomicBool::new(false),
             last_partial: Mutex::new((u32::MAX, String::new())),
+            early: early.then(|| Mutex::new(Early::default())),
             playout: Mutex::new(Playout::default()),
             playout_changed: Condvar::new(),
             closed: AtomicBool::new(false),
@@ -360,9 +431,27 @@ impl Pipeline {
         let result = (|| {
             let heard = self.engine.transcribe(&job.pcm, &shared.source)?;
             let heard = heard.trim();
+            if heard.is_empty() {
+                return Ok(());
+            }
+            let chunk = shared.early.as_ref().and_then(|early| {
+                let mut early = early.lock().unwrap();
+                early.reset(job.index);
+                early.advance(heard, self.config.early_words)
+            });
+            if let Some(chunk) = chunk {
+                let translated = self.engine.translate(&chunk, &shared.source, &shared.target)?;
+                if !translated.trim().is_empty() {
+                    let audio = self.engine.synthesize(translated.trim(), &shared.target)?;
+                    let mut speech = resample(&audio.samples, audio.sample_rate, SAMPLE_RATE);
+                    speech.resize(speech.len() + SAMPLE_RATE as usize * CHUNK_GAP_MS / 1000, 0.0);
+                    self.enqueue(shared, &speech);
+                    self.stats.early_chunks.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             {
                 let mut last = shared.last_partial.lock().unwrap();
-                if heard.is_empty() || (last.0 == job.index && last.1 == heard) {
+                if last.0 == job.index && last.1 == heard {
                     return Ok(());
                 }
                 *last = (job.index, heard.to_string());
@@ -406,7 +495,24 @@ impl Pipeline {
             }
             caption(CaptionKind::Translation, translated);
 
-            self.engine.synthesize(translated, &shared.target).map(Some)
+            let rest = shared.early.as_ref().map_or(heard, |early| {
+                let mut early = early.lock().unwrap();
+                early.reset(job.index);
+                let rest = early.remainder(heard);
+                early.reset(job.index.wrapping_add(1));
+                rest
+            });
+            if rest == heard {
+                return self.engine.synthesize(translated, &shared.target).map(Some);
+            }
+            if rest.is_empty() {
+                return Ok(None);
+            }
+            let rest = self.engine.translate(rest, &shared.source, &shared.target)?;
+            match rest.trim() {
+                "" => Ok(None),
+                rest => self.engine.synthesize(rest, &shared.target).map(Some),
+            }
         })();
         self.stats.inference_ms.fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
 
@@ -586,7 +692,7 @@ mod tests {
         let engine = Engine::sim();
         let pipeline = pipeline(false);
         let (sink, frames) = mpsc::sync_channel(4096);
-        let stream = pipeline.open(1, "en", "fr", sink).unwrap();
+        let stream = pipeline.open(1, "en", "fr", false, sink).unwrap();
         for (i, packet) in spoken(&engine, "hello world", "en").into_iter().enumerate() {
             assert!(stream.push(i as u16, packet));
             if i % 64 == 63 {
@@ -628,7 +734,7 @@ mod tests {
         let engine = Engine::sim();
         let pipeline = pipeline(false);
         let (sink, frames) = mpsc::sync_channel(4096);
-        let stream = pipeline.open(9, "en", "it", sink).unwrap();
+        let stream = pipeline.open(9, "en", "it", false, sink).unwrap();
         play(&stream, spoken(&engine, "thanks my friend and the sea", "en"), true);
         stream.close();
 
@@ -667,7 +773,7 @@ mod tests {
         let config = Config { realtime: false, partial_interval_ms: 0, ..Config::default() };
         let pipeline = Pipeline::new(Arc::new(Engine::sim()), config);
         let (sink, frames) = mpsc::sync_channel(4096);
-        let stream = pipeline.open(10, "en", "fr", sink).unwrap();
+        let stream = pipeline.open(10, "en", "fr", false, sink).unwrap();
         play(&stream, spoken(&engine, "thanks my friend and the sea", "en"), true);
         stream.close();
 
@@ -682,7 +788,7 @@ mod tests {
         let engine = Engine::sim();
         let pipeline = pipeline(false);
         let (sink, frames) = mpsc::sync_channel(8192);
-        let stream = pipeline.open(2, "it", "es", sink).unwrap();
+        let stream = pipeline.open(2, "it", "es", false, sink).unwrap();
 
         let phrases = ["ciao amico", "grazie", "acqua e casa", "notte"];
         let mut sequence = 0u16;
@@ -713,7 +819,7 @@ mod tests {
         let engine = Engine::sim();
         let pipeline = pipeline(false);
         let (sink, frames) = mpsc::sync_channel(4096);
-        let stream = pipeline.open(3, "en", "fr", sink).unwrap();
+        let stream = pipeline.open(3, "en", "fr", false, sink).unwrap();
 
         let packets = spoken(&engine, "hello friend", "en");
         let silent_prefix = 10;
@@ -735,11 +841,66 @@ mod tests {
     }
 
     #[test]
+    fn headphones_streams_start_speaking_before_the_sentence_ends() {
+        let engine = Engine::sim();
+        let pipeline = pipeline(false);
+        let (sink, frames) = mpsc::sync_channel(4096);
+        let stream = pipeline.open(11, "en", "fr", true, sink).unwrap();
+        let sentence = "hello world, and friend, water and house, night and sea and voice";
+        let talker = {
+            let packets = spoken(&engine, sentence, "en");
+            thread::spawn(move || {
+                play(&stream, packets, true);
+                stream.close();
+            })
+        };
+
+        let (mut packets, mut early, mut source) = (Vec::new(), 0, None);
+        while let Ok(frame) = frames.recv_timeout(Duration::from_secs(20)) {
+            match frame {
+                Frame::Speech { packet, .. } => {
+                    early += usize::from(source.is_none());
+                    packets.push(packet);
+                }
+                Frame::Caption { kind: CaptionKind::Source, text, .. } => source = Some(text),
+                Frame::Closed { .. } => break,
+                _ => {}
+            }
+        }
+        talker.join().unwrap();
+
+        assert_eq!(source.as_deref(), Some(sentence));
+        assert!(early > 50, "only {early} frames before the sentence ended");
+        assert!(pipeline.stats().early_chunks.load(Ordering::Relaxed) >= 2);
+        let words = |text: &str| text.replace(',', " ").split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        let expected = engine.translate(sentence, "en", "fr").unwrap();
+        assert_eq!(words(&understand(&engine, &packets, "fr")), words(&expected));
+    }
+
+    #[test]
+    fn early_chunks_follow_settled_words() {
+        let mut early = Early::default();
+        assert_eq!(early.advance("hello world, and", 8), None);
+        assert_eq!(early.advance("hello world, and friend", 8), None);
+        assert_eq!(early.advance("hello world, and friend water", 8), None);
+        assert_eq!(early.advance("Hello world and friend, water and", 8), Some("Hello world and friend,".to_string()));
+        assert_eq!(early.remainder("hello world and friend, water and house"), "water and house");
+        assert_eq!(early.advance("one two three", 2), None);
+        assert_eq!(early.advance("one two three four", 2), None);
+
+        let mut early = Early::default();
+        early.advance("a b c d e", 3);
+        assert_eq!(early.advance("a b c d e f", 3), Some("a b c d e".to_string()));
+        assert_eq!(early.advance("a b x", 3), None);
+        assert_eq!(early.remainder("a b x d e f g"), "f g");
+    }
+
+    #[test]
     fn a_delivery_stall_does_not_break_the_utterance() {
         let engine = Engine::sim();
         let pipeline = pipeline(false);
         let (sink, frames) = mpsc::sync_channel(4096);
-        let stream = pipeline.open(8, "en", "fr", sink).unwrap();
+        let stream = pipeline.open(8, "en", "fr", false, sink).unwrap();
 
         let packets = spoken(&engine, "hello world", "en");
         let middle = packets.len() / 2 - 10;
@@ -760,7 +921,7 @@ mod tests {
         let engine = Engine::sim();
         let pipeline = pipeline(false);
         let (sink, frames) = mpsc::sync_channel(4096);
-        let stream = pipeline.open(4, "en", "it", sink).unwrap();
+        let stream = pipeline.open(4, "en", "it", false, sink).unwrap();
 
         let mut sequence = 0u16;
         for _ in 0..5 {
@@ -780,7 +941,9 @@ mod tests {
     fn unsupported_languages_are_refused() {
         let pipeline = pipeline(false);
         let (sink, _frames) = mpsc::sync_channel(16);
-        assert!(matches!(pipeline.open(5, "en", "de", sink), Err(OpenError::UnsupportedLanguage(l)) if l == "de"));
+        assert!(
+            matches!(pipeline.open(5, "en", "de", false, sink), Err(OpenError::UnsupportedLanguage(l)) if l == "de")
+        );
         assert_eq!(pipeline.stats().streams.load(Ordering::Relaxed), 0);
     }
 
@@ -789,7 +952,7 @@ mod tests {
         let engine = Engine::sim();
         let pipeline = pipeline(true);
         let (sink, frames) = mpsc::sync_channel(4096);
-        let stream = pipeline.open(6, "en", "fr", sink).unwrap();
+        let stream = pipeline.open(6, "en", "fr", false, sink).unwrap();
         for (i, packet) in spoken(&engine, "yes", "en").into_iter().enumerate() {
             stream.push(i as u16, packet);
         }
@@ -822,7 +985,7 @@ mod tests {
         let engine = Engine::sim();
         let pipeline = pipeline(true);
         let (sink, frames) = mpsc::sync_channel(4096);
-        let stream = pipeline.open(7, "en", "fr", sink).unwrap();
+        let stream = pipeline.open(7, "en", "fr", false, sink).unwrap();
         for (i, packet) in spoken(&engine, "hello world and friend", "en").into_iter().enumerate() {
             stream.push(i as u16, packet);
         }

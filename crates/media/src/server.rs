@@ -49,11 +49,11 @@ fn read_loop(connection: &UnixStream, pipeline: &Arc<Pipeline>, output: &SyncSen
 
     while let Some(frame) = Frame::read_from(&mut reader)? {
         match frame {
-            Frame::Open { stream, source, target } => {
+            Frame::Open { stream, source, target, early } => {
                 let opened = if streams.contains_key(&stream) {
                     Err("stream id already in use".to_string())
                 } else {
-                    pipeline.open(stream, &source, &target, output.clone()).map_err(|e| e.to_string())
+                    pipeline.open(stream, &source, &target, early, output.clone()).map_err(|e| e.to_string())
                 };
                 match opened {
                     Ok(handle) => {
@@ -141,7 +141,9 @@ mod tests {
         let (mut client, server) = start();
         assert_eq!(read(&mut client), Frame::Hello { version: VERSION, backend: "sim".into() });
 
-        Frame::Open { stream: 42, source: "fr".into(), target: "en".into() }.write_to(&mut client).unwrap();
+        Frame::Open { stream: 42, source: "fr".into(), target: "en".into(), early: false }
+            .write_to(&mut client)
+            .unwrap();
         let audio = engine.synthesize("bonjour ami", "fr").unwrap();
         let mut pcm = vec![0.0; SAMPLE_RATE as usize / 2];
         pcm.extend(resample(&audio.samples, audio.sample_rate, SAMPLE_RATE));
@@ -183,12 +185,18 @@ mod tests {
         let (mut client, server) = start();
         read(&mut client);
 
-        Frame::Open { stream: 1, source: "en".into(), target: "zz".into() }.write_to(&mut client).unwrap();
+        Frame::Open { stream: 1, source: "en".into(), target: "zz".into(), early: false }
+            .write_to(&mut client)
+            .unwrap();
         assert!(matches!(read(&mut client), Frame::Error { stream: 1, message } if message.contains("zz")));
         assert_eq!(read(&mut client), Frame::Closed { stream: 1 });
 
-        Frame::Open { stream: 2, source: "en".into(), target: "fr".into() }.write_to(&mut client).unwrap();
-        Frame::Open { stream: 2, source: "en".into(), target: "fr".into() }.write_to(&mut client).unwrap();
+        Frame::Open { stream: 2, source: "en".into(), target: "fr".into(), early: false }
+            .write_to(&mut client)
+            .unwrap();
+        Frame::Open { stream: 2, source: "en".into(), target: "fr".into(), early: false }
+            .write_to(&mut client)
+            .unwrap();
         assert!(matches!(read(&mut client), Frame::Error { stream: 2, .. }));
         assert_eq!(read(&mut client), Frame::Closed { stream: 2 });
 

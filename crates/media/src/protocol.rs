@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const MAX_FRAME: usize = 64 * 1024;
 const HEADER: usize = 5;
 
@@ -31,7 +31,7 @@ impl CaptionKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
     Hello { version: u16, backend: String },
-    Open { stream: u32, source: String, target: String },
+    Open { stream: u32, source: String, target: String, early: bool },
     Audio { stream: u32, sequence: u16, packet: Vec<u8> },
     Close { stream: u32 },
     Speech { stream: u32, packet: Vec<u8> },
@@ -98,9 +98,10 @@ impl Frame {
                 out.extend_from_slice(&version.to_be_bytes());
                 out.extend_from_slice(backend.as_bytes());
             }
-            Frame::Open { source, target, .. } => {
+            Frame::Open { source, target, early, .. } => {
                 put_short_string(&mut out, source)?;
                 put_short_string(&mut out, target)?;
+                out.push(u8::from(*early));
             }
             Frame::Audio { sequence, packet, .. } => {
                 out.extend_from_slice(&sequence.to_be_bytes());
@@ -140,10 +141,13 @@ impl Frame {
             tag::OPEN => {
                 let (source, rest) = short_string(payload)?;
                 let (target, rest) = short_string(rest)?;
-                if !rest.is_empty() {
-                    return Err(invalid("trailing bytes after open"));
+                let [flags] = rest else {
+                    return Err(invalid("open needs exactly one flags byte"));
+                };
+                if flags & !1 != 0 {
+                    return Err(invalid("unknown open flags"));
                 }
-                Frame::Open { stream, source, target }
+                Frame::Open { stream, source, target, early: flags & 1 != 0 }
             }
             tag::AUDIO => {
                 if payload.len() < 2 {
@@ -208,8 +212,8 @@ mod tests {
 
     fn samples() -> Vec<(&'static str, Frame)> {
         vec![
-            ("hello", Frame::Hello { version: 2, backend: "sim".into() }),
-            ("open", Frame::Open { stream: 7, source: "en".into(), target: "fr".into() }),
+            ("hello", Frame::Hello { version: 3, backend: "sim".into() }),
+            ("open", Frame::Open { stream: 7, source: "en".into(), target: "fr".into(), early: true }),
             ("audio", Frame::Audio { stream: 7, sequence: 65535, packet: vec![0xde, 0xad, 0xbe, 0xef] }),
             ("close", Frame::Close { stream: 7 }),
             ("speech", Frame::Speech { stream: 0x01020304, packet: vec![1, 2, 3] }),
@@ -264,6 +268,10 @@ mod tests {
         assert!(Frame::decode(&[]).is_err());
         assert!(Frame::decode(&[0x7f, 0, 0, 0, 0]).is_err());
         assert!(Frame::decode(&[tag::OPEN, 0, 0, 0, 1, 5, b'e']).is_err());
+        assert!(Frame::decode(&[tag::OPEN, 0, 0, 0, 1, 2, b'e', b'n', 2, b'f', b'r']).is_err());
+        assert!(Frame::decode(&[tag::OPEN, 0, 0, 0, 1, 2, b'e', b'n', 2, b'f', b'r', 2]).is_err());
+        assert!(Frame::decode(&[tag::OPEN, 0, 0, 0, 1, 2, b'e', b'n', 2, b'f', b'r', 0, 0]).is_err());
+        assert!(Frame::decode(&[tag::OPEN, 0, 0, 0, 1, 2, b'e', b'n', 2, b'f', b'r', 1]).is_ok());
         assert!(Frame::decode(&[tag::CAPTION, 0, 0, 0, 1, 9, 0, 0, 0, 0]).is_err());
         assert!(Frame::decode(&[tag::CAPTION, 0, 0, 0, 1, 4, 0, 0, 0, 0]).is_err());
         assert!(Frame::decode(&[tag::ERROR, 0, 0, 0, 1, 0xff, 0xfe]).is_err());
@@ -277,7 +285,7 @@ mod tests {
     #[test]
     fn oversized_fields_fail_to_encode() {
         let long = "x".repeat(256);
-        assert!(Frame::Open { stream: 1, source: long, target: "fr".into() }.encode().is_err());
+        assert!(Frame::Open { stream: 1, source: long, target: "fr".into(), early: false }.encode().is_err());
         assert!(Frame::Speech { stream: 1, packet: vec![0; MAX_FRAME] }.encode().is_err());
     }
 }

@@ -17,18 +17,22 @@ const USAGE: &str = "\
 ambivox-media — real-time speech translation engine
 
 USAGE:
-    ambivox-media serve  [--socket PATH] [--backend sim|sussurro] [--models DIR]
+    ambivox-media serve  [--socket PATH] [--backend sim|sussurro] [--models DIR] [--whisper NAME]
                          [--workers N] [--threads N] [--bitrate BPS] [--partials-ms MS]
+                         [--early-words N]
     ambivox-media synth  --text TEXT --lang LANG (--out FILE | --wav FILE)
                          [--backend ...] [--models DIR]
     ambivox-media listen --lang LANG (--in FILE | --wav FILE)
-                         [--backend ...] [--models DIR]
+                         [--backend ...] [--models DIR] [--whisper NAME]
     ambivox-media info
 
 `synth` speaks TEXT and stores it as length-prefixed Opus packets (--out) or as
 a 48 kHz WAV file (--wav). `listen` transcribes either format.
 `--partials-ms` sets how often live captions are refreshed while someone is
-speaking (default 800; 0 turns them off).
+speaking (default 800; 0 turns them off). `--whisper` picks the recognition
+model, ggml-NAME.bin in the model directory (default small). `--early-words`
+is how many settled words a stream opened in headphones mode speaks before the
+sentence ends, when no comma comes first (default 8).
 ";
 
 type Failure = Box<dyn std::error::Error>;
@@ -67,7 +71,7 @@ impl Args {
     fn engine(&self) -> Result<Engine, Failure> {
         let backend = self.get("backend").unwrap_or("sim");
         let models = self.get("models").map(Path::new);
-        Ok(Engine::open(backend, models, self.number("threads", 4)?)?)
+        Ok(Engine::open(backend, models, self.get("whisper"), self.number("threads", 4)?)?)
     }
 }
 
@@ -77,6 +81,7 @@ fn serve(args: &Args) -> Result<(), Failure> {
         workers: args.number("workers", 2)?,
         bitrate: args.number("bitrate", 32_000)?,
         partial_interval_ms: args.number("partials-ms", 800)?,
+        early_words: args.number("early-words", 8)?,
         ..Config::default()
     };
     let engine = Arc::new(args.engine()?);

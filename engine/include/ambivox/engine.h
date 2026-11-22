@@ -29,6 +29,8 @@ typedef struct ambivox_config {
     const char * backend;
     const char * model_dir;
     int threads;
+    /* Whisper model name, for ggml-<name>.bin in model_dir; NULL means "small". */
+    const char * asr_model;
 } ambivox_config;
 
 AMBIVOX_API ambivox_engine * ambivox_engine_open(const ambivox_config * config);

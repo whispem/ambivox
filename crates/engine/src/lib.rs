@@ -19,6 +19,7 @@ mod ffi {
         pub backend: *const c_char,
         pub model_dir: *const c_char,
         pub threads: c_int,
+        pub asr_model: *const c_char,
     }
 
     unsafe extern "C" {
@@ -91,16 +92,18 @@ unsafe impl Send for Engine {}
 unsafe impl Sync for Engine {}
 
 impl Engine {
-    pub fn open(backend: &str, model_dir: Option<&Path>, threads: usize) -> Result<Self> {
+    pub fn open(backend: &str, model_dir: Option<&Path>, asr_model: Option<&str>, threads: usize) -> Result<Self> {
         let backend = cstring(backend)?;
         let model_dir = match model_dir {
             Some(path) => Some(cstring(&path.to_string_lossy())?),
             None => None,
         };
+        let asr_model = asr_model.map(cstring).transpose()?;
         let config = ffi::Config {
             backend: backend.as_ptr(),
             model_dir: model_dir.as_ref().map_or(ptr::null(), |d| d.as_ptr()),
             threads: threads.min(c_int::MAX as usize) as c_int,
+            asr_model: asr_model.as_ref().map_or(ptr::null(), |m| m.as_ptr()),
         };
         // SAFETY: `config` and the strings it points to outlive the call.
         let raw = unsafe { ffi::ambivox_engine_open(&config) };
@@ -115,7 +118,7 @@ impl Engine {
     }
 
     pub fn sim() -> Self {
-        Self::open("sim", None, 1).expect("the simulated backend is always available")
+        Self::open("sim", None, None, 1).expect("the simulated backend is always available")
     }
 
     pub fn backend(&self) -> &str {
@@ -225,7 +228,7 @@ mod tests {
         let engine = Engine::sim();
         assert!(matches!(engine.translate("hello", "en", "de"), Err(Error::Unsupported(m)) if m.contains("de")));
         assert!(matches!(engine.translate("a\0b", "en", "fr"), Err(Error::Argument(_))));
-        assert!(matches!(Engine::open("nope", None, 1), Err(Error::Unsupported(_))));
+        assert!(matches!(Engine::open("nope", None, None, 1), Err(Error::Unsupported(_))));
     }
 
     #[test]

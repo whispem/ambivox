@@ -59,7 +59,8 @@ ambivox_engine * ambivox_engine_open(const ambivox_config * config) {
         } else if (backend == "sussurro") {
 #ifdef AMBIVOX_WITH_SUSSURRO
             if (config->model_dir == nullptr) throw ambivox::ModelError("the sussurro backend needs a model directory");
-            impl = ambivox::make_sussurro_backend(config->model_dir, config->threads);
+            impl = ambivox::make_sussurro_backend(config->model_dir, config->threads,
+                                                  config->asr_model != nullptr ? config->asr_model : "small");
 #else
             throw ambivox::Unsupported("built without the sussurro backend");
 #endif

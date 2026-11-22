@@ -1,5 +1,6 @@
 #include "backend.h"
 
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -18,7 +19,8 @@ namespace fs = std::filesystem;
 
 constexpr int kMaxNewTokens = 256;
 constexpr int kBeamSize = 1;
-constexpr const char * kWhisperModel = "ggml-small.bin";
+constexpr float kNoSpeech = 0.6f;
+constexpr float kLowConfidence = -1.0f;
 
 struct Route {
     const char * source;
@@ -71,6 +73,31 @@ std::string find_onnx(const fs::path & dir) {
     return "";
 }
 
+bool valid_model_name(const std::string & name) {
+    if (name.empty() || name.front() == '.') return false;
+    for (const char c : name) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_' && c != '.') return false;
+    }
+    return true;
+}
+
+// Whisper writes something even for a cough or a door. Like OpenAI's reference
+// decoder, a segment counts as silence when the model both expects no speech
+// and has little confidence in the words it produced.
+bool silent(whisper_context * ctx, int segment) {
+    if (whisper_full_get_segment_no_speech_prob(ctx, segment) <= kNoSpeech) return false;
+    const whisper_token eot = whisper_token_eot(ctx);
+    float sum = 0.0f;
+    int count = 0;
+    for (int i = 0; i < whisper_full_n_tokens(ctx, segment); ++i) {
+        const whisper_token_data token = whisper_full_get_token_data(ctx, segment, i);
+        if (token.id >= eot) continue;
+        sum += token.plog;
+        ++count;
+    }
+    return count == 0 || sum / count < kLowConfidence;
+}
+
 std::string trim(const std::string & s) {
     const size_t first = s.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return "";
@@ -80,9 +107,10 @@ std::string trim(const std::string & s) {
 
 class SussurroBackend final : public Backend {
 public:
-    SussurroBackend(const std::string & model_dir, int threads)
-        : dir_(model_dir), threads_(threads > 0 ? threads : 4) {
+    SussurroBackend(const std::string & model_dir, int threads, const std::string & asr_model)
+        : dir_(model_dir), whisper_model_("ggml-" + asr_model + ".bin"), threads_(threads > 0 ? threads : 4) {
         if (!fs::is_directory(dir_)) throw ModelError("model directory not found: " + model_dir);
+        if (!valid_model_name(asr_model)) throw ModelError("invalid whisper model name: " + asr_model);
     }
 
     ~SussurroBackend() override {
@@ -101,6 +129,7 @@ public:
         params.no_context = true;
         params.single_segment = false;
         params.suppress_blank = true;
+        params.suppress_nst = true;
         params.print_progress = false;
         params.print_realtime = false;
         params.print_special = false;
@@ -109,7 +138,7 @@ public:
 
         std::lock_guard<std::mutex> lock(whisper_mutex_);
         if (whisper_ == nullptr) {
-            const std::string path = (dir_ / kWhisperModel).string();
+            const std::string path = (dir_ / whisper_model_).string();
             if (!fs::exists(path)) throw ModelError("whisper model not found: " + path);
             whisper_ = whisper_init_from_file_with_params(path.c_str(), whisper_context_default_params());
             if (whisper_ == nullptr) throw ModelError("cannot load whisper model: " + path);
@@ -117,7 +146,9 @@ public:
         if (whisper_full(whisper_, params, pcm, (int) n) != 0) throw std::runtime_error("whisper inference failed");
         std::string text;
         const int segments = whisper_full_n_segments(whisper_);
-        for (int i = 0; i < segments; ++i) text += whisper_full_get_segment_text(whisper_, i);
+        for (int i = 0; i < segments; ++i) {
+            if (!silent(whisper_, i)) text += whisper_full_get_segment_text(whisper_, i);
+        }
         return trim(text);
     }
 
@@ -207,6 +238,7 @@ private:
     }
 
     fs::path dir_;
+    std::string whisper_model_;
     int threads_;
     whisper_context * whisper_ = nullptr;
     std::mutex whisper_mutex_;
@@ -217,8 +249,9 @@ private:
 
 }
 
-std::unique_ptr<Backend> make_sussurro_backend(const std::string & model_dir, int threads) {
-    return std::make_unique<SussurroBackend>(model_dir, threads);
+std::unique_ptr<Backend> make_sussurro_backend(const std::string & model_dir, int threads,
+                                               const std::string & asr_model) {
+    return std::make_unique<SussurroBackend>(model_dir, threads, asr_model);
 }
 
 }

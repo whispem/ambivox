@@ -7,6 +7,7 @@
 # With no argument every step but converter runs, which translation runs when
 # it needs to. Steps are idempotent. AMBIVOX_CONVERT_PYTHON names a Python that
 # already has the converter's requirements, instead of a private venv.
+# AMBIVOX_WHISPER picks the recognition model (small by default).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -73,15 +74,17 @@ setup_voices() {
 }
 
 setup_whisper() {
+  local name="${AMBIVOX_WHISPER:-small}"
+  [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || die "invalid whisper model name: $name"
   mkdir -p "$MODELS"
-  if [ -f "$MODELS/ggml-small.bin" ]; then
-    say "whisper model already present"
+  if [ -f "$MODELS/ggml-$name.bin" ]; then
+    say "whisper $name already present"
     return
   fi
-  say "downloading whisper small"
-  curl -fSL -o "$MODELS/ggml-small.bin.part" \
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-  mv "$MODELS/ggml-small.bin.part" "$MODELS/ggml-small.bin"
+  say "downloading whisper $name"
+  curl -fSL -o "$MODELS/ggml-$name.bin.part" \
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$name.bin"
+  mv "$MODELS/ggml-$name.bin.part" "$MODELS/ggml-$name.bin"
 }
 
 setup_translation() {
