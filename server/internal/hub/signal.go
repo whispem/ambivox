@@ -102,6 +102,10 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			peer.notify(message{Type: "answer", SDP: answer})
+		case "same-room":
+			peer.room.setSameRoom(msg.SameRoom != nil && *msg.SameRoom)
+		case "headphones":
+			peer.room.setHeadphones(msg.Headphones != nil && *msg.Headphones)
 		case "leave":
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			return

@@ -20,8 +20,8 @@ func samples() []struct {
 		name  string
 		frame Frame
 	}{
-		{"hello", Frame{Type: TypeHello, Version: 2, Text: "sim"}},
-		{"open", Frame{Type: TypeOpen, Stream: 7, Source: "en", Target: "fr"}},
+		{"hello", Frame{Type: TypeHello, Version: 3, Text: "sim"}},
+		{"open", Frame{Type: TypeOpen, Stream: 7, Source: "en", Target: "fr", Early: true}},
 		{"audio", Frame{Type: TypeAudio, Stream: 7, Sequence: 65535, Packet: []byte{0xde, 0xad, 0xbe, 0xef}}},
 		{"close", Frame{Type: TypeClose, Stream: 7}},
 		{"speech", Frame{Type: TypeSpeech, Stream: 0x01020304, Packet: []byte{1, 2, 3}}},
@@ -103,7 +103,9 @@ func TestMalformedFramesAreRejected(t *testing.T) {
 		{},
 		{0x7f, 0, 0, 0, 0},
 		{byte(TypeOpen), 0, 0, 0, 1, 5, 'e'},
-		{byte(TypeOpen), 0, 0, 0, 1, 1, 'e', 1, 'f', 0},
+		{byte(TypeOpen), 0, 0, 0, 1, 1, 'e', 1, 'f'},
+		{byte(TypeOpen), 0, 0, 0, 1, 1, 'e', 1, 'f', 2},
+		{byte(TypeOpen), 0, 0, 0, 1, 1, 'e', 1, 'f', 0, 0},
 		{byte(TypeCaption), 0, 0, 0, 1, 9, 0, 0, 0, 0},
 		{byte(TypeCaption), 0, 0, 0, 1, 4, 0, 0, 0, 0},
 		{byte(TypeCaption), 0, 0, 0, 1, 0},

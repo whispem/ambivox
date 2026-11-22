@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -39,6 +40,8 @@ type message struct {
 	Lang       string     `json:"lang,omitempty"`
 	Name       string     `json:"name,omitempty"`
 	Token      string     `json:"token,omitempty"`
+	SameRoom   *bool      `json:"sameRoom,omitempty"`
+	Headphones *bool      `json:"headphones,omitempty"`
 	Peer       *peerInfo  `json:"peer,omitempty"`
 	SDP        string     `json:"sdp,omitempty"`
 	From       string     `json:"from,omitempty"`
@@ -73,8 +76,11 @@ type Peer struct {
 	out *webrtc.TrackLocalStaticSample
 
 	// Guarded by room.mu.
-	stream   *medialink.Stream
-	streamTo *Peer
+	stream      *medialink.Stream
+	streamTo    *Peer
+	streamEarly bool
+	level       int
+	levelAt     time.Time
 }
 
 func (p *Peer) info() *peerInfo {
@@ -135,17 +141,18 @@ func (p *Peer) negotiate(offer string, onFail func()) (string, error) {
 		}
 	}()
 
-	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		if track.Kind() != webrtc.RTPCodecTypeAudio {
 			return
 		}
+		levelID := audioLevelID(receiver)
 		for {
 			packet, _, err := track.ReadRTP()
 			if err != nil {
 				return
 			}
 			if len(packet.Payload) > 0 {
-				p.room.route(p, packet.SequenceNumber, packet.Payload)
+				p.room.route(p, packet.SequenceNumber, packet.Payload, audioLevel(packet, levelID))
 			}
 		}
 	})

@@ -54,13 +54,16 @@ const cleanup = async () => {
   rmSync(dir, { recursive: true, force: true });
 };
 
-const ready = () =>
+const fetchText = (path) =>
   new Promise((resolve) => {
-    get(`${ORIGIN}/readyz`, { rejectUnauthorized: false }, (response) => {
-      response.resume();
-      resolve(response.statusCode === 200);
-    }).on('error', () => resolve(false));
+    get(`${ORIGIN}${path}`, { rejectUnauthorized: false }, (response) => {
+      let body = '';
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, body }));
+    }).on('error', () => resolve({ status: 0, body: '' }));
   });
+
+const ready = async () => (await fetchText('/readyz')).status === 200;
 
 async function waitForServer() {
   const deadline = Date.now() + 10_000;
@@ -148,6 +151,24 @@ try {
   };
   expect(heardByBob, { source: 'hello world', translation: 'bonjour monde' }, 'Bob hearing Alice');
   expect(heardByAlice, { source: 'hello world', translation: 'hello world' }, 'Alice hearing Bob');
+
+  for (const id of ['headphones', 'same-room']) {
+    await alice.evaluate((id) => document.getElementById(id).click(), id);
+    for (const page of [alice, bob]) {
+      await page.waitForFunction((id) => document.getElementById(id).getAttribute('aria-pressed') === 'true', {
+        timeout: TIMEOUT_MS,
+        polling: 200,
+      }, id);
+    }
+  }
+  const muted = /^ambivox_rtp_packets_same_room_muted_total (\d+)$/m;
+  const deadline = Date.now() + TIMEOUT_MS;
+  for (;;) {
+    const match = muted.exec((await fetchText('/metrics')).body);
+    if (match && Number(match[1]) > 0) break;
+    if (Date.now() > deadline) throw new Error('same room mode never silenced a microphone: Chrome sent no audio levels');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
   console.log('browser check passed: invited call over HTTPS translated end to end in Chrome');
 } catch (error) {
   console.error(`browser check failed: ${error.message}`);

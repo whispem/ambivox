@@ -90,7 +90,7 @@ func TestStreamLifecycle(t *testing.T) {
 	}
 
 	rec := newRecorder()
-	stream, err := link.Open("en", "fr", rec)
+	stream, err := link.Open("en", "fr", false, rec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestRefusedStreamReportsErrorThenCloses(t *testing.T) {
 	eventually(t, "connection", link.Connected)
 
 	rec := newRecorder()
-	if _, err := link.Open("en", "zz", rec); err != nil {
+	if _, err := link.Open("en", "zz", false, rec); err != nil {
 		t.Fatal(err)
 	}
 	rec.waitClosed(t)
@@ -132,8 +132,8 @@ func TestStreamsAreIndependent(t *testing.T) {
 	eventually(t, "connection", link.Connected)
 
 	a, b := newRecorder(), newRecorder()
-	sa, _ := link.Open("en", "fr", a)
-	sb, _ := link.Open("fr", "en", b)
+	sa, _ := link.Open("en", "fr", false, a)
+	sb, _ := link.Open("fr", "en", false, b)
 	sa.Write(0, []byte("a"))
 	sb.Write(0, []byte("b"))
 	sa.Close()
@@ -159,7 +159,7 @@ func TestReconnectsAndOrphansStreams(t *testing.T) {
 	eventually(t, "connection", link.Connected)
 
 	rec := newRecorder()
-	stream, err := link.Open("en", "fr", rec)
+	stream, err := link.Open("en", "fr", false, rec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestReconnectsAndOrphansStreams(t *testing.T) {
 
 	stream.Write(1, []byte("ignored"))
 	stream.Close()
-	if _, err := link.Open("en", "fr", newRecorder()); err != medialink.ErrDisconnected {
+	if _, err := link.Open("en", "fr", false, newRecorder()); err != medialink.ErrDisconnected {
 		t.Errorf("Open while down: %v", err)
 	}
 
@@ -179,7 +179,7 @@ func TestReconnectsAndOrphansStreams(t *testing.T) {
 	eventually(t, "reconnection", link.Connected)
 
 	again := newRecorder()
-	fresh, err := link.Open("en", "fr", again)
+	fresh, err := link.Open("en", "fr", false, again)
 	if err != nil {
 		t.Fatal(err)
 	}

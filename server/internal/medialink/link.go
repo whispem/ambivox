@@ -103,7 +103,7 @@ func (l *Link) Stats() map[string]float64 {
 
 func (l *Link) Dropped() uint64 { return l.dropped.Load() }
 
-func (l *Link) Open(source, target string, handler Handler) (*Stream, error) {
+func (l *Link) Open(source, target string, early bool, handler Handler) (*Stream, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s := l.session
@@ -112,7 +112,7 @@ func (l *Link) Open(source, target string, handler Handler) (*Stream, error) {
 	}
 	id := l.nextID.Add(1)
 	s.streams[id] = handler
-	frame := protocol.Frame{Type: protocol.TypeOpen, Stream: id, Source: source, Target: target}
+	frame := protocol.Frame{Type: protocol.TypeOpen, Stream: id, Source: source, Target: target, Early: early}
 	select {
 	case s.out <- frame:
 	default:

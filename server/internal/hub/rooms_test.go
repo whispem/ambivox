@@ -144,3 +144,111 @@ func TestEchoGuardSilencesTheSpeakerWhileTheirTranslationPlays(t *testing.T) {
 	time.Sleep(time.Second)
 	f.talk(alice, bob, 0xa2, 1)
 }
+
+func TestSameRoomGivesTheFloorToTheLouderMicrophone(t *testing.T) {
+	f := setup(t, 10)
+	alice, welcome := f.join("kitchen", "it", "Alice")
+	if welcome["sameRoom"] != false {
+		t.Errorf("welcome = %v", welcome)
+	}
+	bob, _ := f.join("kitchen", "it", "Bob")
+	f.connect(alice, bob)
+
+	_ = alice.Send(testclient.Event{"type": "same-room", "sameRoom": true})
+	for _, client := range []*testclient.Client{alice, bob} {
+		if event := f.wait(client, "same-room"); event["sameRoom"] != true {
+			t.Fatalf("same-room = %v", event)
+		}
+	}
+
+	count := func(c *testclient.Client, marker byte) (n int) {
+		for _, packet := range c.Packets() {
+			if len(packet) == 4 && packet[1] == marker {
+				n++
+			}
+		}
+		return n
+	}
+	both := func(near, far *testclient.Client, nearMarker, farMarker byte) {
+		for i := range 40 {
+			if err := near.WriteAudio([]byte{0x78, nearMarker, byte(i), 0xff}, frame); err != nil {
+				t.Fatal(err)
+			}
+			if err := far.WriteAudio([]byte{0x78, farMarker, byte(i), 0xff}, frame); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(frame)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	alice.SetLevel(20)
+	bob.SetLevel(36)
+	both(alice, bob, 0xa1, 0xb1)
+	if heard := count(bob, 0xa1); heard < 30 {
+		t.Errorf("Bob heard %d of Alice's 40 packets", heard)
+	}
+	if leaked := count(alice, 0xb1); leaked > 5 {
+		t.Errorf("Alice heard %d packets of her own voice through Bob's microphone", leaked)
+	}
+
+	time.Sleep(time.Second)
+	bob.SetLevel(22)
+	alice.SetLevel(38)
+	both(bob, alice, 0xb2, 0xa2)
+	if heard := count(alice, 0xb2); heard < 30 {
+		t.Errorf("Alice heard %d of Bob's 40 packets once he spoke", heard)
+	}
+	if leaked := count(bob, 0xa2); leaked > 5 {
+		t.Errorf("Bob heard %d packets of his own voice through Alice's microphone", leaked)
+	}
+
+	_ = bob.Send(testclient.Event{"type": "same-room", "sameRoom": false})
+	f.wait(alice, "same-room")
+	both(alice, bob, 0xa3, 0xb3)
+	if count(bob, 0xa3) < 30 || count(alice, 0xb3) < 30 {
+		t.Errorf("with the mode off, each side should hear the other: %d, %d", count(bob, 0xa3), count(alice, 0xb3))
+	}
+}
+
+func TestHeadphonesReopenStreamsEarlyAndLiftTheEchoGuard(t *testing.T) {
+	f := setup(t, 10, func(cfg *hub.Config) { cfg.EchoGuard = true })
+	alice, welcome := f.join("desk", "en", "Alice")
+	if welcome["headphones"] != false {
+		t.Errorf("welcome = %v", welcome)
+	}
+	bob, _ := f.join("desk", "fr", "Bob")
+	f.connect(alice, bob)
+	f.eventually("two streams", func() bool { return f.engine.Opened() == 2 })
+
+	_ = bob.Send(testclient.Event{"type": "headphones", "headphones": true})
+	for _, client := range []*testclient.Client{alice, bob} {
+		if event := f.wait(client, "headphones"); event["headphones"] != true {
+			t.Fatalf("headphones = %v", event)
+		}
+	}
+	f.eventually("early streams", func() bool { return f.engine.OpenedEarly() == 2 })
+
+	for i := range 20 {
+		if err := alice.WriteAudio([]byte{0x78, 0xa1, byte(i), 0xff}, frame); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(frame)
+	}
+	heard := func() (n int) {
+		for _, packet := range bob.Packets() {
+			if len(packet) == 4 && packet[1] == 0xa1 {
+				n++
+			}
+		}
+		return n
+	}
+	f.eventually("Alice's packets", func() bool { return heard() >= 15 })
+
+	_ = alice.Send(testclient.Event{"type": "headphones", "headphones": false})
+	f.wait(bob, "headphones")
+	f.eventually("plain streams", func() bool { return f.engine.Opened() == 6 })
+	if f.engine.OpenedEarly() != 2 {
+		t.Errorf("%d early streams after headphones were turned off", f.engine.OpenedEarly())
+	}
+}

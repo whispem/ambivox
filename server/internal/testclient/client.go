@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/pion/ice/v4"
+	"github.com/pion/interceptor"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
@@ -27,6 +30,7 @@ type Client struct {
 	conn  *websocket.Conn
 	pc    *webrtc.PeerConnection
 	track *webrtc.TrackLocalStaticSample
+	level atomic.Int32
 
 	mu        sync.Mutex
 	events    []Event
@@ -44,6 +48,7 @@ func Dial(ctx context.Context, url string) (*Client, error) {
 	}
 	conn.SetReadLimit(1 << 20)
 	c := &Client{conn: conn, changed: make(chan struct{}, 1)}
+	c.level.Store(-1)
 	go c.read()
 	return c, nil
 }
@@ -170,10 +175,16 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	err = engine.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: audioLevelURI}, webrtc.RTPCodecTypeAudio)
+	if err != nil {
+		return err
+	}
+	interceptors := &interceptor.Registry{}
+	interceptors.Add(levelStamper{&c.level})
 	settings := webrtc.SettingEngine{}
 	settings.SetIncludeLoopbackCandidate(true)
 	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithSettingEngine(settings))
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithSettingEngine(settings), webrtc.WithInterceptorRegistry(interceptors))
 
 	pc, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -234,6 +245,12 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 }
 
+// SetLevel makes the following packets report this loudness in -dBov, as a
+// browser does; a negative level stops reporting it.
+func (c *Client) SetLevel(level int) {
+	c.level.Store(int32(level))
+}
+
 func (c *Client) WriteAudio(packet []byte, duration time.Duration) error {
 	return c.track.WriteSample(media.Sample{Data: packet, Duration: duration})
 }
@@ -249,4 +266,38 @@ func (c *Client) Close() {
 		_ = c.pc.Close()
 	}
 	_ = c.conn.Close(websocket.StatusNormalClosure, "")
+}
+
+const audioLevelURI = "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
+
+type levelStamper struct{ level *atomic.Int32 }
+
+func (f levelStamper) NewInterceptor(string) (interceptor.Interceptor, error) {
+	return &stamper{level: f.level}, nil
+}
+
+type stamper struct {
+	interceptor.NoOp
+	level *atomic.Int32
+}
+
+func (s *stamper) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
+	var id uint8
+	for _, ext := range info.RTPHeaderExtensions {
+		if ext.URI == audioLevelURI {
+			id = uint8(ext.ID)
+		}
+	}
+	if id == 0 {
+		return writer
+	}
+	return interceptor.RTPWriterFunc(func(header *rtp.Header, payload []byte, attributes interceptor.Attributes) (int, error) {
+		if level := s.level.Load(); level >= 0 {
+			ext, err := rtp.AudioLevelExtension{Level: uint8(level), Voice: level <= 50}.Marshal()
+			if err == nil {
+				_ = header.SetExtension(id, ext)
+			}
+		}
+		return writer.Write(header, payload, attributes)
+	})
 }

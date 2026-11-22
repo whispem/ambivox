@@ -85,6 +85,7 @@ type Hub struct {
 	captions      *metrics.Counter
 	partials      *metrics.Counter
 	muted         *metrics.Counter
+	floorMuted    *metrics.Counter
 }
 
 func New(cfg Config) (*Hub, error) {
@@ -103,6 +104,10 @@ func New(cfg Config) (*Hub, error) {
 		RTPCodecCapability: opusCapability,
 		PayloadType:        111,
 	}, webrtc.RTPCodecTypeAudio)
+	if err != nil {
+		return nil, err
+	}
+	err = media.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: audioLevelURI}, webrtc.RTPCodecTypeAudio)
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +171,7 @@ func New(cfg Config) (*Hub, error) {
 	h.captions = m.Counter("ambivox_captions_total", "Final captions delivered to participants.")
 	h.partials = m.Counter("ambivox_partial_captions_total", "Live caption updates delivered while someone speaks.")
 	h.muted = m.Counter("ambivox_rtp_packets_muted_total", "Packets silenced because the sender's translation was playing.")
+	h.floorMuted = m.Counter("ambivox_rtp_packets_same_room_muted_total", "Packets silenced because the other participant in the same room was speaking.")
 	m.Gauge("ambivox_rooms", "Open rooms.", func() float64 { return float64(h.Rooms()) })
 	m.Gauge("ambivox_peers", "Connected participants.", func() float64 { return float64(h.Peers()) })
 	m.Gauge("ambivox_media_connected", "Whether the media engine link is up.", func() float64 {
@@ -274,16 +280,18 @@ func (h *Hub) join(roomID, lang, name, token string) (*Peer, error) {
 	h.rooms[roomID] = room
 	room.rewire()
 
-	connected := h.cfg.Link.Connected()
+	connected, sameRoom, headphones := h.cfg.Link.Connected(), room.sameRoom, room.headphones
 	welcome := message{
-		Type:      "joined",
-		ID:        peer.ID,
-		Room:      roomID,
-		Lang:      peer.Lang,
-		Name:      peer.Name,
-		Connected: &connected,
-		Backend:   h.cfg.Link.Backend(),
-		Languages: Languages,
+		Type:       "joined",
+		ID:         peer.ID,
+		Room:       roomID,
+		Lang:       peer.Lang,
+		Name:       peer.Name,
+		Connected:  &connected,
+		SameRoom:   &sameRoom,
+		Headphones: &headphones,
+		Backend:    h.cfg.Link.Backend(),
+		Languages:  Languages,
 	}
 	if len(h.cfg.ICEServers) > 0 {
 		welcome.ICEServers = []iceEntry{{URLs: h.cfg.ICEServers}}
@@ -307,6 +315,9 @@ func (h *Hub) leave(peer *Peer) {
 		if peer.stream != nil {
 			go peer.stream.Close()
 			peer.stream, peer.streamTo = nil, nil
+		}
+		if room.floor == peer {
+			room.floor = nil
 		}
 		room.rewire()
 		for _, other := range room.peers {
@@ -350,8 +361,31 @@ type Room struct {
 	id  string
 	hub *Hub
 
-	mu    sync.Mutex
-	peers []*Peer
+	mu         sync.Mutex
+	peers      []*Peer
+	sameRoom   bool
+	headphones bool
+	floor      *Peer
+	floorUntil time.Time
+}
+
+func (r *Room) setSameRoom(on bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sameRoom, r.floor = on, nil
+	for _, p := range r.peers {
+		p.notify(message{Type: "same-room", SameRoom: &on})
+	}
+}
+
+func (r *Room) setHeadphones(on bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.headphones = on
+	for _, p := range r.peers {
+		p.notify(message{Type: "headphones", Headphones: &on})
+	}
+	r.rewire()
 }
 
 func (r *Room) other(p *Peer) *Peer {
@@ -368,7 +402,7 @@ func (r *Room) rewire() {
 	for _, p := range r.peers {
 		other := r.other(p)
 		translate := other != nil && other.Lang != p.Lang
-		if p.stream != nil && (!translate || p.streamTo != other) {
+		if p.stream != nil && (!translate || p.streamTo != other || p.streamEarly != r.headphones) {
 			go p.stream.Close()
 			p.stream, p.streamTo = nil, nil
 		}
@@ -376,19 +410,23 @@ func (r *Room) rewire() {
 			continue
 		}
 		b := &bridge{room: r, from: p, to: other}
-		stream, err := r.hub.cfg.Link.Open(p.Lang, other.Lang, b)
+		stream, err := r.hub.cfg.Link.Open(p.Lang, other.Lang, r.headphones, b)
 		if err != nil {
 			r.hub.log.Warn("cannot open translation stream", "room", r.id, "peer", p.ID, "error", err)
 			continue
 		}
 		b.stream = stream
-		p.stream, p.streamTo = stream, other
+		p.stream, p.streamTo, p.streamEarly = stream, other, r.headphones
 	}
 }
 
-func (r *Room) route(from *Peer, sequence uint16, payload []byte) {
+func (r *Room) route(from *Peer, sequence uint16, payload []byte, level int) {
 	r.mu.Lock()
-	other, stream := r.other(from), from.stream
+	other, stream, guard := r.other(from), from.stream, r.hub.cfg.EchoGuard && !r.headphones
+	if r.sameRoom && !r.hasFloor(from, level, time.Now()) {
+		payload = silentFrame
+		r.hub.floorMuted.Inc()
+	}
 	r.mu.Unlock()
 	r.hub.packetsIn.Inc()
 
@@ -398,7 +436,7 @@ func (r *Room) route(from *Peer, sequence uint16, payload []byte) {
 		other.writeSample(payload)
 		r.hub.packetsDirect.Inc()
 	case stream != nil:
-		if r.hub.cfg.EchoGuard && time.Now().UnixNano() < from.quietUntil.Load() {
+		if guard && time.Now().UnixNano() < from.quietUntil.Load() {
 			payload = silentFrame
 			r.hub.muted.Inc()
 		}

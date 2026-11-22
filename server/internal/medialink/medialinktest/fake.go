@@ -23,6 +23,7 @@ type Engine struct {
 	listener net.Listener
 	conns    map[net.Conn]struct{}
 	opened   int
+	early    int
 	wg       sync.WaitGroup
 }
 
@@ -88,6 +89,12 @@ func (e *Engine) Opened() int {
 	return e.opened
 }
 
+func (e *Engine) OpenedEarly() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.early
+}
+
 func (e *Engine) serve(conn net.Conn) {
 	defer func() {
 		conn.Close()
@@ -133,6 +140,9 @@ func (e *Engine) serve(conn net.Conn) {
 			streams[id] = &stream{source: frame.Source, target: frame.Target}
 			e.mu.Lock()
 			e.opened++
+			if frame.Early {
+				e.early++
+			}
 			e.mu.Unlock()
 			ok = send(protocol.Frame{Type: protocol.TypeStats, Text: fmt.Sprintf(`{"streams":%d}`, len(streams))})
 		case protocol.TypeAudio:

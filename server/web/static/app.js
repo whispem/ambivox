@@ -117,6 +117,8 @@ async function handle(message) {
   switch (message.type) {
     case 'joined':
       state.me = message;
+      showSameRoom(message.sameRoom);
+      showHeadphones(message.headphones);
       setPeer(message.peer ?? null);
       setStatus(message.connected ? `Translation engine: ${message.backend}` : 'Translation engine offline');
       await connect(message.iceServers ?? []);
@@ -127,6 +129,12 @@ async function handle(message) {
     case 'peer-joined':
       showError('');
       setPeer(message.peer);
+      break;
+    case 'same-room':
+      showSameRoom(message.sameRoom);
+      break;
+    case 'headphones':
+      showHeadphones(message.headphones);
       break;
     case 'peer-left':
       showError('');
@@ -229,6 +237,26 @@ if (navigator.share) {
 }
 
 $('leave').addEventListener('click', hangUp);
+
+function showSameRoom(on) {
+  $('same-room').setAttribute('aria-pressed', String(Boolean(on)));
+  const automatic = params.get('raw') !== '1' && !on;
+  state.mic?.getAudioTracks().forEach((track) => {
+    track.applyConstraints({ autoGainControl: automatic }).catch(() => {});
+  });
+}
+
+$('same-room').addEventListener('click', () => {
+  send({ type: 'same-room', sameRoom: $('same-room').getAttribute('aria-pressed') !== 'true' });
+});
+
+function showHeadphones(on) {
+  $('headphones').setAttribute('aria-pressed', String(Boolean(on)));
+}
+
+$('headphones').addEventListener('click', () => {
+  send({ type: 'headphones', headphones: $('headphones').getAttribute('aria-pressed') !== 'true' });
+});
 
 $('mute').addEventListener('click', () => {
   const muted = $('mute').getAttribute('aria-pressed') !== 'true';

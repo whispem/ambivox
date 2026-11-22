@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	Version  = 2
-	MaxFrame = 64 * 1024
-	header   = 5
+	Version   = 3
+	MaxFrame  = 64 * 1024
+	header    = 5
+	openEarly = 1
 )
 
 type Type uint8
@@ -57,6 +58,7 @@ type Frame struct {
 	Utterance uint32
 	Source    string
 	Target    string
+	Early     bool
 	Text      string
 	Packet    []byte
 }
@@ -83,6 +85,11 @@ func (f Frame) Append(dst []byte) ([]byte, error) {
 		dst = append(dst, f.Source...)
 		dst = append(dst, byte(len(f.Target)))
 		dst = append(dst, f.Target...)
+		var flags byte
+		if f.Early {
+			flags |= openEarly
+		}
+		dst = append(dst, flags)
 	case TypeAudio:
 		dst = binary.BigEndian.AppendUint16(dst, f.Sequence)
 		dst = append(dst, f.Packet...)
@@ -137,9 +144,10 @@ func Decode(body []byte) (Frame, error) {
 		if f.Target, rest, err = shortString(rest); err != nil {
 			return Frame{}, err
 		}
-		if len(rest) != 0 {
+		if len(rest) != 1 || rest[0]&^openEarly != 0 {
 			return Frame{}, ErrMalformed
 		}
+		f.Early = rest[0]&openEarly != 0
 	case TypeAudio:
 		if len(payload) < 2 {
 			return Frame{}, ErrMalformed
