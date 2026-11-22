@@ -32,7 +32,10 @@ Alice speaks French, Bob listens in English.
 5. **Segment.** An energy-based voice activity detector tracks the noise floor
    and cuts the stream into utterances: 40 ms of speech opens one, 600 ms of
    silence closes it, 300 ms of pre-roll keeps the first consonant, and anything
-   longer than 15 s is cut so latency stays bounded.
+   longer than 15 s is cut so latency stays bounded. A loud frame only counts
+   as a voice when it is also periodic, with a pitch between 70 and 400 Hz; an
+   utterance with less than 60 ms of it is dropped, so knocks and doors never
+   reach whisper, which would hear "thank you" in them.
 6. **Preview.** While the utterance is still open, the engine transcribes what
    has been said so far, every 800 ms once it is 600 ms long, and translates
    that draft. The drafts are sent as partial captions so both people watch the
@@ -130,6 +133,22 @@ dependencies stay out of the Rust link line.
   buffering, the speaker's packets are replaced by Opus silence before they
   reach the engine. Browsers cancel the echo of their own loudspeaker; this
   covers the one next to them.
+- **Same room mode.** With both devices side by side, each microphone hears
+  both people, and the engine would translate the wrong one. Browsers report
+  the loudness of every packet in an RTP header extension; the louder
+  microphone takes the floor, and the other one is replaced by silence until
+  600 ms after the speaker stops. A clearly louder voice, by 6 dB or more,
+  takes the floor at once, so the right person wins even when the wrong
+  microphone was heard first. The page also turns automatic gain control off,
+  which would otherwise even out the difference.
+- **Headphones mode.** With nothing coming out of a loudspeaker the echo guard
+  is not needed, so the engine may speak before the sentence ends. It compares
+  consecutive partial transcripts and treats the words they agree on as
+  settled, minus the last one, which may still change. Once a clause ends with
+  punctuation after at least three settled words, or eight settled words go by
+  without one, that part is translated and spoken while the speaker carries
+  on. At the end of the utterance only the rest is spoken; the final captions
+  keep the whole sentence, translated in one piece.
 - **One UDP port.** With `-udp-port`, every call shares a single socket and
   ICE tells the connections apart, so a firewall or a container needs one port
   opened instead of a range.
@@ -140,7 +159,7 @@ dependencies stay out of the Rust link line.
   loud rooms; a model-based detector would slot in behind the same interface.
 - Drafts are recomputed from the start of the utterance each time, which is
   simple and keeps whisper's context, at the cost of repeated work on long
-  sentences. Audio still waits for the end of the utterance; speaking
-  confirmed fragments early is the next step.
+  sentences. Outside headphones mode, audio still waits for the end of the
+  utterance.
 - One engine process serves one server process. Scaling out means running more
   pairs behind a load balancer that keeps a room on one pair.

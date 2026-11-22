@@ -17,7 +17,7 @@ that concern the whole connection.
 
 | Type | Name | Payload |
 |---|---|---|
-| `0x01` | OPEN | `source_len:u8 source target_len:u8 target` — language codes |
+| `0x01` | OPEN | `source_len:u8 source target_len:u8 target flags:u8` — language codes, then flags |
 | `0x02` | AUDIO | `sequence:u16 opus` — one Opus packet and its RTP sequence number |
 | `0x03` | CLOSE | empty — finish the stream gracefully |
 
@@ -25,7 +25,7 @@ that concern the whole connection.
 
 | Type | Name | Payload |
 |---|---|---|
-| `0x00` | HELLO | `version:u16 backend` — sent once, first; current version is `2` |
+| `0x00` | HELLO | `version:u16 backend` — sent once, first; current version is `3` |
 | `0x81` | SPEECH | `opus` — one 20 ms Opus packet (48 kHz mono) of translated speech |
 | `0x82` | CAPTION | `kind:u8 utterance:u32 text` — see below |
 | `0x83` | ERROR | `text` — a problem with this stream; the stream stays open unless CLOSED follows |
@@ -53,8 +53,12 @@ protocol error and the receiver drops the connection.
   still being spoken; each replaces the previous one with the same number, and
   the final pair (kinds `0` and `1`) replaces them all. Partials may be skipped
   under load, never the final pair.
-- Version 2 added partial captions. Both processes refuse a peer that speaks
-  another version.
+- OPEN flags: bit 0 asks the engine to speak early, before the utterance ends,
+  as soon as the start of the sentence has settled across partial
+  transcripts. The other bits must be zero. The final captions still carry the
+  whole sentence; only the speech is split.
+- Version 2 added partial captions, version 3 the OPEN flags. Both processes
+  refuse a peer that speaks another version.
 - Dropping the connection closes every stream immediately.
 
 `testdata/protocol_vectors.txt` holds one encoded example of each frame. The
@@ -70,6 +74,8 @@ same origin as the page unless the server was started with `-allow-origin`.
 ```json
 {"type": "join", "room": "3f9c…", "lang": "fr", "name": "Em", "token": "tqk2a8.Jdy…"}
 {"type": "offer", "sdp": "…"}
+{"type": "same-room", "sameRoom": true}
+{"type": "headphones", "headphones": true}
 {"type": "leave"}
 ```
 
@@ -78,13 +84,19 @@ same origin as the page unless the server was started with `-allow-origin`.
 `token` is the invitation for that room; it is ignored when the server runs
 with `-open-rooms`.
 The offer carries one `sendrecv` audio section with all ICE candidates already
-gathered; there is exactly one offer per session.
+gathered; there is exactly one offer per session. The server accepts the
+`urn:ietf:params:rtp-hdrext:ssrc-audio-level` header extension, which browsers
+offer by default; same room mode needs it. `same-room` turns that mode on or
+off for both participants. `headphones` does the same for headphones mode: the
+server reopens the translation streams with the early flag and stops the echo
+guard, which would otherwise silence the speaker while the start of their
+sentence is already playing.
 
 ### Server → client
 
 ```json
 {"type": "joined", "id": "9f2c…", "room": "3f9c…", "lang": "fr", "name": "Em",
- "connected": true, "backend": "sussurro", "languages": ["en", "fr", "es", "it"],
+ "connected": true, "sameRoom": false, "headphones": false, "backend": "sussurro", "languages": ["en", "fr", "es", "it"],
  "peer": {"id": "41aa…", "name": "Bob", "lang": "en"},
  "iceServers": [{"urls": ["stun:stun.example.org:3478"]}]}
 {"type": "answer", "sdp": "…"}
@@ -94,6 +106,8 @@ gathered; there is exactly one offer per session.
 {"type": "caption", "from": "9f2c…", "kind": "translation", "utterance": 3, "final": false, "text": "hello to"}
 {"type": "caption", "from": "9f2c…", "kind": "source", "utterance": 3, "final": true, "text": "bonjour à tous"}
 {"type": "caption", "from": "9f2c…", "kind": "translation", "utterance": 3, "final": true, "text": "hello everyone"}
+{"type": "same-room", "sameRoom": true}
+{"type": "headphones", "headphones": true}
 {"type": "media", "connected": false, "backend": ""}
 {"type": "error", "message": "…"}
 ```
@@ -101,7 +115,8 @@ gathered; there is exactly one offer per session.
 `peer` and `iceServers` are omitted when there is nothing to report. Captions go
 to both participants; `from` is the speaker. A caption with `"final": false` is
 a live draft that the next caption for the same `from`, `utterance` and `kind`
-replaces. `media` announces that the translation engine went away or came back.
+replaces. `same-room` and `headphones` tell both participants that one of them changed
+that mode. `media` announces that the translation engine went away or came back.
 
 A join that cannot be honoured (missing, forged or expired invitation, full
 room, room limit, invalid name or language) gets an `error` and the socket is closed with status 1008. Errors after joining

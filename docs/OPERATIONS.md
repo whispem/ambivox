@@ -51,7 +51,7 @@ which file is missing. To use a model directory that already exists on the
 machine instead, set `AMBIVOX_MODELS=./models` in `.env`.
 
 The images come from `ghcr.io/whispem/ambivox`, built for x86-64 and arm64 at
-every release: `0.5` (and `latest`) for ambivox itself, `0.5-models` for the
+every release: `0.6` (and `latest`) for ambivox itself, `0.6-models` for the
 model setup. `AMBIVOX_VERSION` picks another release. To build them from the
 sources instead, add the second compose file:
 
@@ -68,9 +68,9 @@ not start elsewhere; set `AMBIVOX_PORTABLE=1` when building binaries to copy
 to other machines. Each image holds the licences of what it was built from in
 `/usr/share/licenses/ambivox`.
 
-`AMBIVOX_ACCESS_KEY`, `AMBIVOX_INVITE_TTL` and `AMBIVOX_ECHO_GUARD` can go in
-`.env` too; other settings from the table below are passed through
-`compose.yaml` the same way. `AMBIVOX_BACKEND=sim` runs the simulated backend,
+`AMBIVOX_ACCESS_KEY`, `AMBIVOX_INVITE_TTL`, `AMBIVOX_ECHO_GUARD` and
+`AMBIVOX_WHISPER` can go in `.env` too; other settings from the table below
+are passed through `compose.yaml` the same way. `AMBIVOX_BACKEND=sim` runs the simulated backend,
 which needs no models.
 
 ### Without Docker
@@ -85,7 +85,7 @@ ambivox -listen :8443 -tls-self-signed -udp-port 8443 -data-dir ~/.ambivox
 The server prints the addresses to open, for instance:
 
 ~~~text
-ambivox 0.5.0 is ready. Open this on any device on the same network:
+ambivox 0.6.0 is ready. Open this on any device on the same network:
   https://192.168.1.20:8443
   https://localhost:8443
 The certificate is self-signed: each browser asks once to trust it. Its fingerprint is
@@ -230,6 +230,8 @@ Every flag has an environment variable; flags win.
 | `--threads` | `4` | threads each model may use |
 | `--bitrate` | `32000` | Opus bitrate of translated speech |
 | `--partials-ms` | `800` | how often live captions are refreshed while someone speaks; `0` turns them off |
+| `--early-words` | `8` | in headphones mode, how many settled words are spoken before the sentence ends when no comma comes first |
+| `--whisper` | `small` | recognition model, `ggml-NAME.bin` in the model directory |
 
 Budget roughly `workers × threads` cores for inference. With two participants
 talking in turn, one worker is busy at a time.
@@ -250,6 +252,22 @@ models/
 
 `scripts/setup-sussurro.sh` builds this layout. It is the same one sussurro.cpp
 uses, plus the whisper model.
+
+`small` is quick enough for any recent machine. On a fast one, a larger
+whisper model hears accents, names and noisy rooms better: `large-v3-turbo` is
+the best trade-off, `medium` sits in between. Download it with
+`AMBIVOX_WHISPER=large-v3-turbo scripts/setup-sussurro.sh whisper`, or
+`docker compose run --rm models` with the same variable in `.env`, then start
+the engine with `--whisper large-v3-turbo`; in Docker, `AMBIVOX_WHISPER` in
+`.env` does both. Any model published for whisper.cpp works the same way.
+
+Two filters keep noises out of the captions. The voice detector only passes
+sounds with a pitch, as voices have; a knock, a door or a clap has none and
+never reaches whisper. Recognition then skips what whisper itself takes for
+silence: a segment it believes holds no speech, and whose words it is unsure
+of, is dropped rather than captioned and translated. Without them, whisper
+tends to hear "thank you" or "merci" in any noise. Whispering has no pitch
+either, so speak aloud.
 
 ## Network
 
@@ -291,6 +309,7 @@ Server:
 | `ambivox_rtp_packets_relayed_total` | counter | packets relayed untouched (same language) |
 | `ambivox_rtp_packets_translated_total` | counter | packets sent to the engine |
 | `ambivox_rtp_packets_muted_total` | counter | packets silenced by the echo guard |
+| `ambivox_rtp_packets_same_room_muted_total` | counter | packets silenced because the other participant in the same room was speaking |
 | `ambivox_speech_packets_sent_total` | counter | translated packets sent to participants |
 | `ambivox_captions_total` | counter | final captions delivered |
 | `ambivox_partial_captions_total` | counter | live caption updates delivered |
@@ -298,7 +317,8 @@ Server:
 Engine counters arrive every two seconds and are re-exported with the prefix
 `ambivox_engine_`: `streams`, `packets_in`, `packets_lost`, `packets_dropped`,
 `utterances`, `partials`, `partials_skipped`, `frames_out`, `frames_dropped`,
-`backlog_dropped_ms`, `errors`, `inference_ms`, `partial_ms`.
+`backlog_dropped_ms`, `errors`, `inference_ms`, `partial_ms`, `early_chunks`
+(pieces of a sentence spoken before it ended, in headphones mode).
 
 Worth alerting on: `ambivox_media_connected == 0`, a rising
 `ambivox_engine_errors`, and `ambivox_engine_backlog_dropped_ms` above zero,
@@ -321,10 +341,16 @@ devices in one room, without headphones: one plays the translation, the other
 hears it and sends it to be translated again. The echo guard stops this; make
 sure it has not been turned off with `-echo-guard=false`.
 
+**Words nobody said, with both devices in one room.** Each microphone also
+hears the other person, so their voice is sent twice, once as if it were
+yours. Press **Same room** on either device. If
+`ambivox_rtp_packets_same_room_muted_total` stays at zero with the mode on,
+the browser does not report audio levels and the mode cannot work there.
+
 **The beginning of a sentence is lost.** It was said while the previous
 translation was still playing, so the echo guard silenced it. Wait for the
-translation to finish, or, with headphones on both sides, use
-`-echo-guard=false`.
+translation to finish, or, with headphones on both sides, press
+**Headphones**.
 
 **"This invitation link has expired" or "is not valid".** Start a new call and
 send the new link. Links also stop working when the invitation key changes:
@@ -342,6 +368,12 @@ models (see sussurro.cpp).
 sentence so far. `partial_ms / partials` is the cost of one draft; if it is
 close to `--partials-ms`, raise the interval, or set it to `0` on a machine that
 struggles: the final captions and the voice are unaffected either way.
+
+**Headphones mode speaks no earlier.** It needs live captions: with
+`--partials-ms 0` there is nothing to settle on. If `ambivox_engine_early_chunks`
+stays at zero, the drafts keep changing their first words; a quieter room or a
+larger whisper model steadies them. Lower `--early-words` to start sooner, at
+the cost of translating smaller pieces.
 
 **Words are cut or sentences merge.** The voice detector is energy-based; a
 headset helps more than any setting.

@@ -73,8 +73,8 @@ Docker too, is in [docs/OPERATIONS.md](docs/OPERATIONS.md#on-a-local-network).
 
 ## Quick start from source
 
-Requirements: Rust 1.88+, Go 1.26+, CMake 3.16+ (3.28+ for the real backend) and a
-C++17 compiler.
+Requirements: Rust 1.100+, Go 1.26+, CMake 3.16+ (3.28+ for the real backend) and a
+C++20 compiler.
 
 ```bash
 make check    # format, lint, unit tests, and a full call end to end
@@ -155,12 +155,16 @@ compose.yaml       The media engine and the server for Docker, plus the model se
   [docs/OPERATIONS.md](docs/OPERATIONS.md#privacy).
 - Captions are written live while someone speaks; the translated voice follows
   once the speaker pauses, typically one to three seconds later depending on
-  hardware.
+  hardware. If you both wear headphones, press **Headphones**: the voice then
+  starts at the first comma or after a few words, while the sentence goes on.
+  Translating a sentence in pieces can read less naturally than in one go.
 - When both participants pick the same language the audio is relayed untouched.
 - While your translation is playing to the other person, your microphone is
   silenced, so two devices in the same room cannot feed each other's voice
-  back in a loop. Wait for it to finish before going on, or turn this off with
-  `-echo-guard=false` if both of you wear headphones.
+  back in a loop. Wait for it to finish before going on. **Headphones** turns
+  this off for the call, `-echo-guard=false` for the whole server.
+- With both devices in one room, press **Same room**: each microphone also
+  hears the other person, and only the one closer to whoever speaks is kept.
 - The assembly kernels cover x86-64 and AArch64; other targets use the scalar
   Rust implementation (`--no-default-features` forces it anywhere).
 

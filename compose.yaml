@@ -1,12 +1,13 @@
 name: ambivox
 
-x-image: &image ghcr.io/whispem/ambivox:${AMBIVOX_VERSION:-0.5}
+x-image: &image ghcr.io/whispem/ambivox:${AMBIVOX_VERSION:-0.6}
 
 services:
   media:
     image: *image
     restart: unless-stopped
-    command: ["ambivox-media", "serve", "--socket", "/run/ambivox/media.sock", "--backend", "${AMBIVOX_BACKEND:-sussurro}", "--models", "/models"]
+    command: ["ambivox-media", "serve", "--socket", "/run/ambivox/media.sock", "--backend", "${AMBIVOX_BACKEND:-sussurro}",
+              "--models", "/models", "--whisper", "${AMBIVOX_WHISPER:-small}"]
     volumes:
       - socket:/run/ambivox
       - ${AMBIVOX_MODELS:-models}:/models:ro
@@ -30,8 +31,10 @@ services:
       - data:/data
 
   models:
-    image: ghcr.io/whispem/ambivox:${AMBIVOX_VERSION:-0.5}-models
+    image: ghcr.io/whispem/ambivox:${AMBIVOX_VERSION:-0.6}-models
     profiles: [setup]
+    environment:
+      AMBIVOX_WHISPER: ${AMBIVOX_WHISPER:-small}
     volumes:
       - ${AMBIVOX_MODELS:-models}:/models
 
