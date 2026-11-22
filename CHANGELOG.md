@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.0
+
+- Same room mode. With both devices side by side, each microphone also hears
+  the other person, and ambivox translated whatever reached it. **Same room**
+  in the call keeps only the microphone closer to whoever speaks, using the
+  loudness browsers report in every packet. New message `same-room`, new field
+  `sameRoom` in `joined`, new metric
+  `ambivox_rtp_packets_same_room_muted_total`.
+- Headphones mode. When both people wear headphones, **Headphones** in the
+  call makes the translated voice start before the sentence ends: as soon as
+  a clause is settled across live transcripts, or after eight settled words,
+  it is translated and spoken while the speaker goes on. The echo guard is off
+  for that call. New message `headphones`, new field `headphones` in `joined`,
+  new `ambivox-media serve --early-words`, new engine counter `early_chunks`.
+  The engine protocol moves to version 3: OPEN gains a flags byte, so the
+  server and the engine must be upgraded together.
+- Noises no longer turn into sentences such as "merci" or "thank you". The
+  voice detector only passes sounds with a pitch, so knocks and doors never
+  reach whisper, and recognition drops what whisper takes for silence, as
+  OpenAI's reference decoder does, and suppresses non-speech tokens.
+  `SegmenterConfig` gains `min_pitched_ms`.
+- The whisper model can be chosen: `--whisper` for `ambivox-media`,
+  `AMBIVOX_WHISPER` for Docker and the setup script, `WHISPER` for `make run`.
+  `small` stays the default; `large-v3-turbo` is more accurate on a fast
+  machine. The engine's C ABI gains `asr_model` at the end of
+  `ambivox_config`.
+- Building needs Rust 1.100 or later, and the engine is written in C++20.
+
 ## 0.5.0
 
 - The server needs Go 1.26 or later; Go 1.24 is no longer supported upstream.
