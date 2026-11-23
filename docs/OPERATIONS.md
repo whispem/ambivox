@@ -269,6 +269,42 @@ of, is dropped rather than captioned and translated. Without them, whisper
 tends to hear "thank you" or "merci" in any noise. Whispering has no pitch
 either, so speak aloud.
 
+### Measuring a model
+
+`make bench BACKEND=sussurro` runs every sentence of `bench/sentences.txt`
+through the engine, one after the other, and prints a table per language pair:
+
+| Column | Meaning |
+|---|---|
+| `WER` | word error rate of recognition: words missed, added or misheard, over the words said |
+| `chrF` | how close the translation of what was heard is to the reference translation, from 0 to 100 |
+| `chrF text` | the same for a translation of the sentence as written, so translation alone, without recognition errors |
+| `listen`, `translate`, `speak` | median time of each step |
+| `total p50`, `total p90` | time from the end of a sentence to the translated voice being ready, for half and nine in ten of the sentences |
+
+Sentences recognition got wrong are listed below the table, with what was said
+and what was heard. By default each sentence is spoken by the engine's own Piper
+voice, which is clearer than a person in a room, so recognition looks better
+than it is. For real figures, record yourself: one 16-bit mono WAV per sentence,
+named after its id, in a directory given with `--recordings`. On a Mac, a voice
+memo converts with `afconvert -f WAVE -d LEI16@16000 -c 1 memo.m4a fr-en-01.wav`.
+Sentences without a recording keep the synthetic voice.
+
+To compare models, run the same set with each and keep the results as JSON:
+
+```
+make bench BACKEND=sussurro BENCH_ARGS="--recordings ~/ambivox-voice --json small.json"
+make bench BACKEND=sussurro WHISPER=large-v3-turbo BENCH_ARGS="--recordings ~/ambivox-voice --json turbo.json"
+```
+
+`--only fr-en` keeps one pair. The set is a plain text file with one sentence
+per line and five fields separated by `|`: id, spoken language, target
+language, sentence, reference translation. Recognition is compared in lower
+case and without punctuation; a number counts the same spelled out or in
+digits, up to 69, and an English contraction the same as its long form, so
+"I've" and "I have" are not an error. chrF is compared in lower case. A
+language pair whose models are missing is skipped and named above the table.
+
 ## Network
 
 - Browsers only grant microphone access on `https://` or `localhost`. For

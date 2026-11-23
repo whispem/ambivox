@@ -11,7 +11,7 @@ use ambivox_dsp::resample::resample;
 use ambivox_engine::{ASR_SAMPLE_RATE, Engine};
 use ambivox_media::codec::{self, Decoder, Encoder, SAMPLE_RATE};
 use ambivox_media::pipeline::{Config, Pipeline};
-use ambivox_media::{log, server, wav};
+use ambivox_media::{bench, log, server, wav};
 
 const USAGE: &str = "\
 ambivox-media — real-time speech translation engine
@@ -24,6 +24,8 @@ USAGE:
                          [--backend ...] [--models DIR]
     ambivox-media listen --lang LANG (--in FILE | --wav FILE)
                          [--backend ...] [--models DIR] [--whisper NAME]
+    ambivox-media bench  [--set FILE] [--recordings DIR] [--only PAIR] [--json FILE]
+                         [--backend ...] [--models DIR] [--whisper NAME] [--threads N]
     ambivox-media info
 
 `synth` speaks TEXT and stores it as length-prefixed Opus packets (--out) or as
@@ -33,6 +35,10 @@ speaking (default 800; 0 turns them off). `--whisper` picks the recognition
 model, ggml-NAME.bin in the model directory (default small). `--early-words`
 is how many settled words a stream opened in headphones mode speaks before the
 sentence ends, when no comma comes first (default 8).
+`bench` runs each sentence of a set (default bench/sentences.txt) through
+recognition, translation and synthesis, then reports the word error rate, chrF
+against the reference translation, and how long each step took. Each sentence is
+spoken by the engine's own voice, unless --recordings holds a file named ID.wav.
 ";
 
 type Failure = Box<dyn std::error::Error>;
@@ -149,6 +155,59 @@ fn listen(args: &Args) -> Result<(), Failure> {
     Ok(())
 }
 
+fn run_bench(args: &Args) -> Result<(), Failure> {
+    let path = args.get("set").unwrap_or("bench/sentences.txt");
+    let set = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut cases = bench::parse_set(&set).map_err(|e| format!("{path}: {e}"))?;
+    if let Some(pair) = args.get("only") {
+        cases.retain(|case| format!("{}-{}", case.source, case.target) == pair);
+    }
+    if cases.is_empty() {
+        return Err("no sentences to run".into());
+    }
+    let recordings = args.get("recordings").map(Path::new);
+    let engine = args.engine()?;
+    let whisper = if engine.backend() == "sim" { "-" } else { args.get("whisper").unwrap_or("small") };
+
+    eprintln!("warming up {} ({} sentences)", engine.backend(), cases.len());
+    let skipped = bench::warm_up(&engine, &mut cases);
+    if cases.is_empty() {
+        return Err(format!("every language pair failed:\n{}", skipped.join("\n")).into());
+    }
+    let mut outcomes = Vec::with_capacity(cases.len());
+    for (i, case) in cases.iter().enumerate() {
+        eprint!("\r{}/{}", i + 1, cases.len());
+        outcomes.push(bench::measure(&engine, case, recordings)?);
+    }
+    eprintln!();
+
+    let recorded = outcomes.iter().filter(|o| o.recorded).count();
+    let rows = bench::summaries(&outcomes);
+    println!(
+        "backend {}, whisper {}, {} sentences, {} recorded, {} synthesized\n",
+        engine.backend(),
+        whisper,
+        outcomes.len(),
+        recorded,
+        outcomes.len() - recorded
+    );
+    for pair in &skipped {
+        println!("skipped {pair}");
+    }
+    if !skipped.is_empty() {
+        println!();
+    }
+    print!("{}", bench::table(&rows));
+    let misheard = bench::misheard(&outcomes);
+    if !misheard.is_empty() {
+        println!("\nmisheard:\n{misheard}");
+    }
+    if let Some(path) = args.get("json") {
+        std::fs::write(path, bench::json(engine.backend(), whisper, &rows, &outcomes))?;
+    }
+    Ok(())
+}
+
 fn info() {
     println!("ambivox-media {}", env!("CARGO_PKG_VERSION"));
     println!("kernels: {}", kernels::backend());
@@ -160,9 +219,10 @@ fn main() -> ExitCode {
     let mut argv = std::env::args().skip(1);
     let command = argv.next().unwrap_or_default();
     let result = match command.as_str() {
-        "serve" | "synth" | "listen" => Args::parse(argv).and_then(|args| match command.as_str() {
+        "serve" | "synth" | "listen" | "bench" => Args::parse(argv).and_then(|args| match command.as_str() {
             "serve" => serve(&args),
             "synth" => synth(&args),
+            "bench" => run_bench(&args),
             _ => listen(&args),
         }),
         "info" => {

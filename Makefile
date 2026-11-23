@@ -8,6 +8,7 @@ WHISPER ?= small
 LISTEN  ?= 127.0.0.1:8080
 SOCKET  ?= /tmp/ambivox-media.sock
 SERVER_FLAGS ?=
+BENCH_ARGS ?=
 
 MEDIA_BIN  := $(CURDIR)/target/release/ambivox-media
 SERVER_BIN := $(CURDIR)/bin/ambivox
@@ -17,7 +18,7 @@ MODEL_ARGS := $(if $(filter sussurro,$(BACKEND)),--models $(MODELS) --whisper $(
 # The bundled libopus build predates CMake 4's minimum policy version.
 export CMAKE_POLICY_VERSION_MINIMUM ?= 3.5
 
-.PHONY: all build media server test test-engine test-rust test-go e2e offline lint check run lan browser-check clean
+.PHONY: all build media server test test-engine test-rust test-go e2e offline lint check run lan bench browser-check clean
 
 all: build
 
@@ -66,6 +67,9 @@ run: build
 
 lan:
 	$(MAKE) run LISTEN=:8443 SERVER_FLAGS="-tls-self-signed -udp-port 8443 -data-dir $(CURDIR)/.ambivox $(SERVER_FLAGS)"
+
+bench: media
+	$(MEDIA_BIN) bench --backend $(BACKEND) $(MODEL_ARGS) $(BENCH_ARGS)
 
 browser-check: build
 	cd scripts/browser-check && npm install --no-audit --no-fund && \

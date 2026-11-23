@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `ambivox-media bench` and `make bench` measure a model setup on a set of
+  sentences: word error rate of recognition, chrF of the translation against a
+  reference (the same formula as sacreBLEU), and the time each step takes.
+  `bench/sentences.txt` holds 56 everyday sentences across every supported
+  language pair. Recordings of your own voice replace the synthetic one.
+  Numbers spelled out or in digits and English contractions count the same,
+  and a pair whose models are missing is skipped.
+
 ## 0.6.0
 
 - Same room mode. With both devices side by side, each microphone also hears

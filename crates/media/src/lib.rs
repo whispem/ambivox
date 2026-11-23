@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod codec;
 pub mod pipeline;
 pub mod protocol;
