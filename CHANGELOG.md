@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - `ambivox-media bench` and `make bench` measure a model setup on a set of
   sentences: word error rate of recognition, chrF of the translation against a
@@ -8,7 +8,21 @@
   `bench/sentences.txt` holds 56 everyday sentences across every supported
   language pair. Recordings of your own voice replace the synthetic one.
   Numbers spelled out or in digits and English contractions count the same,
-  and a pair whose models are missing is skipped.
+  and a pair whose models are missing is skipped. Translations far from the
+  reference are listed with what came out.
+- Translation can run on a language model: `--translator NAME` loads
+  `NAME.gguf` from the model directory with llama.cpp and prompts it as
+  TranslateGemma expects. One model covers every language pair. `opus`, the
+  per-pair models, stays the default. `TRANSLATOR` for `make`,
+  `AMBIVOX_TRANSLATOR` for Docker. The engine's C ABI gains `translator` at the
+  end of `ambivox_config`, and the Rust `Engine::open` takes an `Options`.
+- With a language model, the voice no longer waits for the whole translation.
+  The model hands over its text as it writes, and each clause of three words or
+  more that ends in a punctuation mark is spoken while the rest is translated.
+  The model also keeps the instructions of its prompt from one sentence to the
+  next instead of reading them again. New C function `ambivox_translate_stream`,
+  new engine counter `streamed_clauses`, new `voice p50` column in the bench:
+  the time until the first words of the translated voice are ready.
 
 ## 0.6.0
 

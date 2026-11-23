@@ -51,7 +51,7 @@ which file is missing. To use a model directory that already exists on the
 machine instead, set `AMBIVOX_MODELS=./models` in `.env`.
 
 The images come from `ghcr.io/whispem/ambivox`, built for x86-64 and arm64 at
-every release: `0.6` (and `latest`) for ambivox itself, `0.6-models` for the
+every release: `0.7` (and `latest`) for ambivox itself, `0.7-models` for the
 model setup. `AMBIVOX_VERSION` picks another release. To build them from the
 sources instead, add the second compose file:
 
@@ -68,10 +68,10 @@ not start elsewhere; set `AMBIVOX_PORTABLE=1` when building binaries to copy
 to other machines. Each image holds the licences of what it was built from in
 `/usr/share/licenses/ambivox`.
 
-`AMBIVOX_ACCESS_KEY`, `AMBIVOX_INVITE_TTL`, `AMBIVOX_ECHO_GUARD` and
-`AMBIVOX_WHISPER` can go in `.env` too; other settings from the table below
-are passed through `compose.yaml` the same way. `AMBIVOX_BACKEND=sim` runs the simulated backend,
-which needs no models.
+`AMBIVOX_ACCESS_KEY`, `AMBIVOX_INVITE_TTL`, `AMBIVOX_ECHO_GUARD`,
+`AMBIVOX_WHISPER` and `AMBIVOX_TRANSLATOR` can go in `.env` too; other settings
+from the table below are passed through `compose.yaml` the same way.
+`AMBIVOX_BACKEND=sim` runs the simulated backend, which needs no models.
 
 ### Without Docker
 
@@ -85,7 +85,7 @@ ambivox -listen :8443 -tls-self-signed -udp-port 8443 -data-dir ~/.ambivox
 The server prints the addresses to open, for instance:
 
 ~~~text
-ambivox 0.6.0 is ready. Open this on any device on the same network:
+ambivox 0.7.0 is ready. Open this on any device on the same network:
   https://192.168.1.20:8443
   https://localhost:8443
 The certificate is self-signed: each browser asks once to trust it. Its fingerprint is
@@ -232,6 +232,7 @@ Every flag has an environment variable; flags win.
 | `--partials-ms` | `800` | how often live captions are refreshed while someone speaks; `0` turns them off |
 | `--early-words` | `8` | in headphones mode, how many settled words are spoken before the sentence ends when no comma comes first |
 | `--whisper` | `small` | recognition model, `ggml-NAME.bin` in the model directory |
+| `--translator` | `opus` | translation model: `opus` for the per-pair models, or `NAME.gguf` in the model directory, run with llama.cpp |
 
 Budget roughly `workers × threads` cores for inference. With two participants
 talking in turn, one worker is busy at a time.
@@ -261,6 +262,29 @@ the best trade-off, `medium` sits in between. Download it with
 the engine with `--whisper large-v3-turbo`; in Docker, `AMBIVOX_WHISPER` in
 `.env` does both. Any model published for whisper.cpp works the same way.
 
+Translation can also run on a language model through llama.cpp. ambivox is
+written for TranslateGemma, Google's translation model built on Gemma 3. Use
+the 12B on Apple silicon or a machine with a GPU: download a GGUF of it (a
+`Q4_K_M` quantisation, about 7 GB), put it in the model directory as, for
+instance, `translategemma-12b.gguf`, and start the engine with
+`--translator translategemma-12b` (`TRANSLATOR=translategemma-12b` with `make`,
+`AMBIVOX_TRANSLATOR` in Docker). One model covers every language pair, so the
+per-pair models are then not needed. TranslateGemma is published under
+Google's Gemma terms, which you accept by downloading it; ambivox itself stays
+MIT.
+
+On an M5 Max with the synthetic voices of `make bench`, the 12B scores a chrF
+of 77.4 against 76.9 for opus on the sentence text, with clear gains from and
+into Italian and Spanish and between French, Spanish and Italian, which opus
+does not cover. It adds about 300 ms per sentence (421 ms total at the median
+against 147 ms) and tends to use the formal register, `vous` in French. The
+voice does not wait for the whole translation: each clause is spoken as soon as
+the model has written it, so a sentence with a comma or a full stop in the
+middle is heard sooner, 382 ms at the median on the bench and more on long
+sentences. The 4B scored below opus and is not worth the extra time. On a CPU
+the 12B is too slow for a call: keep opus there. Run `make bench` with both
+translators on your own machine before choosing.
+
 Two filters keep noises out of the captions. The voice detector only passes
 sounds with a pitch, as voices have; a knock, a door or a clap has none and
 never reaches whisper. Recognition then skips what whisper itself takes for
@@ -280,6 +304,7 @@ through the engine, one after the other, and prints a table per language pair:
 | `chrF` | how close the translation of what was heard is to the reference translation, from 0 to 100 |
 | `chrF text` | the same for a translation of the sentence as written, so translation alone, without recognition errors |
 | `listen`, `translate`, `speak` | median time of each step |
+| `voice p50` | time from the end of a sentence to the first words of the translated voice being ready; shorter than the total when a language model translates a sentence with a clause in it |
 | `total p50`, `total p90` | time from the end of a sentence to the translated voice being ready, for half and nine in ten of the sentences |
 
 Sentences recognition got wrong are listed below the table, with what was said
@@ -354,7 +379,9 @@ Engine counters arrive every two seconds and are re-exported with the prefix
 `ambivox_engine_`: `streams`, `packets_in`, `packets_lost`, `packets_dropped`,
 `utterances`, `partials`, `partials_skipped`, `frames_out`, `frames_dropped`,
 `backlog_dropped_ms`, `errors`, `inference_ms`, `partial_ms`, `early_chunks`
-(pieces of a sentence spoken before it ended, in headphones mode).
+(pieces of a sentence spoken before it ended, in headphones mode),
+`streamed_clauses` (clauses of a translation spoken before a language model
+finished it).
 
 Worth alerting on: `ambivox_media_connected == 0`, a rising
 `ambivox_engine_errors`, and `ambivox_engine_backlog_dropped_ms` above zero,

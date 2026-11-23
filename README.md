@@ -91,7 +91,9 @@ tested deterministically. It does not understand human speech.
 ## Real speech
 
 The real backend uses whisper.cpp for recognition, sussurro.cpp (OPUS-MT) for
-translation and Piper voices through sherpa-onnx for synthesis.
+translation and Piper voices through sherpa-onnx for synthesis. Translation can
+instead run on TranslateGemma through llama.cpp; see
+[docs/OPERATIONS.md](docs/OPERATIONS.md#model-directory).
 
 ```bash
 scripts/setup-sussurro.sh              # downloads the runtime and several GB of models
@@ -177,6 +179,6 @@ compose.yaml       The media engine and the server for Docker, plus the model se
 ## License
 
 MIT, see [LICENSE](LICENSE). Models and third-party runtimes keep their own
-licences: whisper.cpp and ggml (MIT), OPUS-MT models (CC-BY 4.0), SentencePiece
-and sherpa-onnx (Apache-2.0), Piper voices (see each model card), Opus (BSD),
-Pion (MIT).
+licences: whisper.cpp, llama.cpp and ggml (MIT), OPUS-MT models (CC-BY 4.0),
+TranslateGemma if you choose it (Gemma terms), SentencePiece and sherpa-onnx
+(Apache-2.0), Piper voices (see each model card), Opus (BSD), Pion (MIT).

@@ -95,8 +95,10 @@ integer conversions must match bit for bit.
 
 ### Inference engine
 
-`engine/` exposes five C functions (`engine/include/ambivox/engine.h`). Two
-back ends implement them:
+`engine/` exposes a small C ABI (`engine/include/ambivox/engine.h`): open and
+close an engine, transcribe, translate, synthesize. `ambivox_translate_stream`
+also reports the translation as it grows, so the voice can start before it is
+finished. Two back ends implement them:
 
 - **`sim`** turns text into a sequence of tones and back. Each byte becomes two
   differentially encoded tones out of seventeen, framed with a length and a
@@ -104,8 +106,13 @@ back ends implement them:
   makes the end-to-end tests exact: the test asserts on the text decoded from
   the audio that came out of the far end.
 - **`sussurro`** uses whisper.cpp for recognition, sussurro.cpp for translation
-  and sherpa-onnx with Piper voices for synthesis. Models load on first use and
-  stay resident; each model is guarded by its own mutex.
+  and sherpa-onnx with Piper voices for synthesis. With `--translator`,
+  translation runs instead on a language model through llama.cpp, prompted the
+  way TranslateGemma expects. llama.cpp is pinned to the revision whose ggml is
+  the one sussurro.cpp and whisper.cpp build on, so the three share a single
+  copy. The language model keeps what it has already read, so the instructions
+  of its prompt are not read again for every sentence. Models load on first use
+  and stay resident; each model is guarded by its own mutex.
 
 The engine is built by CMake, driven from the Rust build script. The simulated
 back end links statically; the real one is a shared library so that its own
