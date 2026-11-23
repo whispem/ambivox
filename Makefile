@@ -5,6 +5,7 @@ CMAKE   ?= cmake
 BACKEND ?= sim
 MODELS  ?= models
 WHISPER ?= small
+TRANSLATOR ?= opus
 LISTEN  ?= 127.0.0.1:8080
 SOCKET  ?= /tmp/ambivox-media.sock
 SERVER_FLAGS ?=
@@ -13,7 +14,7 @@ BENCH_ARGS ?=
 MEDIA_BIN  := $(CURDIR)/target/release/ambivox-media
 SERVER_BIN := $(CURDIR)/bin/ambivox
 FEATURES   := $(if $(filter sussurro,$(BACKEND)),--features sussurro,)
-MODEL_ARGS := $(if $(filter sussurro,$(BACKEND)),--models $(MODELS) --whisper $(WHISPER),)
+MODEL_ARGS := $(if $(filter sussurro,$(BACKEND)),--models $(MODELS) --whisper $(WHISPER) --translator $(TRANSLATOR),)
 
 # The bundled libopus build predates CMake 4's minimum policy version.
 export CMAKE_POLICY_VERSION_MINIMUM ?= 3.5

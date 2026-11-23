@@ -8,12 +8,14 @@ use std::time::Instant;
 use ambivox_dsp::resample::resample;
 use ambivox_engine::{ASR_SAMPLE_RATE, Engine};
 
+use crate::pipeline::clause_end;
 use crate::wav;
 
 const CHRF_ORDER: usize = 6;
 const CHRF_BETA: f64 = 2.0;
 const LEAD_MS: usize = 300;
 const TAIL_MS: usize = 600;
+const FAR_CHRF: f64 = 50.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Case {
@@ -305,6 +307,7 @@ pub struct Outcome {
     pub listen_ms: u64,
     pub translate_ms: u64,
     pub speak_ms: u64,
+    pub voice_ms: u64,
     chrf: Chrf,
     chrf_text: Chrf,
 }
@@ -376,10 +379,16 @@ pub fn measure(engine: &Engine, case: &Case, recordings: Option<&Path>) -> Resul
     let listen_ms = milliseconds(started);
 
     let started = Instant::now();
+    let mut first = None;
     let translation = if heard.is_empty() {
         String::new()
     } else {
-        engine.translate(&heard, &case.source, &case.target)?.trim().to_string()
+        let follow = |text: &str| {
+            if first.is_none() {
+                first = clause_end(text).map(|end| (milliseconds(started), text[..end].trim().to_string()));
+            }
+        };
+        engine.translate_with(&heard, &case.source, &case.target, follow)?.trim().to_string()
     };
     let translate_ms = milliseconds(started);
 
@@ -388,6 +397,16 @@ pub fn measure(engine: &Engine, case: &Case, recordings: Option<&Path>) -> Resul
         engine.synthesize(&translation, &case.target)?;
     }
     let speak_ms = milliseconds(started);
+
+    let voice_ms = listen_ms
+        + match first {
+            Some((at, clause)) => {
+                let started = Instant::now();
+                engine.synthesize(&clause, &case.target)?;
+                at + milliseconds(started)
+            }
+            None => translate_ms + speak_ms,
+        };
 
     let mut chrf = Chrf::default();
     chrf.add(&case.reference, &translation);
@@ -403,6 +422,7 @@ pub fn measure(engine: &Engine, case: &Case, recordings: Option<&Path>) -> Resul
         listen_ms,
         translate_ms,
         speak_ms,
+        voice_ms,
         chrf,
         chrf_text,
     })
@@ -418,6 +438,7 @@ pub struct Summary {
     pub listen_ms: u64,
     pub translate_ms: u64,
     pub speak_ms: u64,
+    pub voice_p50_ms: u64,
     pub total_p50_ms: u64,
     pub total_p90_ms: u64,
 }
@@ -450,6 +471,7 @@ pub fn summarize(label: &str, outcomes: &[&Outcome]) -> Summary {
         listen_ms: median(|o| o.listen_ms),
         translate_ms: median(|o| o.translate_ms),
         speak_ms: median(|o| o.speak_ms),
+        voice_p50_ms: median(|o| o.voice_ms),
         total_p50_ms: median(Outcome::total_ms),
         total_p90_ms: percentile(outcomes.iter().map(|o| o.total_ms()).collect(), 0.9),
     }
@@ -481,13 +503,13 @@ pub fn table(rows: &[Summary]) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<6} {:>4} {:>7} {:>6} {:>10} {:>8} {:>10} {:>8} {:>10} {:>10}",
-        "pair", "n", "WER", "chrF", "chrF text", "listen", "translate", "speak", "total p50", "total p90"
+        "{:<6} {:>4} {:>7} {:>6} {:>10} {:>8} {:>10} {:>8} {:>10} {:>10} {:>10}",
+        "pair", "n", "WER", "chrF", "chrF text", "listen", "translate", "speak", "voice p50", "total p50", "total p90"
     );
     for row in rows {
         let _ = writeln!(
             out,
-            "{:<6} {:>4} {:>6.1}% {:>6.1} {:>10.1} {:>5} ms {:>7} ms {:>5} ms {:>7} ms {:>7} ms",
+            "{:<6} {:>4} {:>6.1}% {:>6.1} {:>10.1} {:>5} ms {:>7} ms {:>5} ms {:>7} ms {:>7} ms {:>7} ms",
             row.label,
             row.count,
             row.word_error_rate,
@@ -496,6 +518,7 @@ pub fn table(rows: &[Summary]) -> String {
             row.listen_ms,
             row.translate_ms,
             row.speak_ms,
+            row.voice_p50_ms,
             row.total_p50_ms,
             row.total_p90_ms
         );
@@ -508,6 +531,17 @@ pub fn misheard(outcomes: &[Outcome]) -> String {
     for outcome in outcomes.iter().filter(|o| o.word_errors.0 > 0) {
         let _ = writeln!(out, "{}  said:  {}", outcome.case.id, outcome.case.text);
         let _ = writeln!(out, "{}  heard: {}", " ".repeat(outcome.case.id.chars().count()), outcome.heard);
+    }
+    out
+}
+
+pub fn mistranslated(outcomes: &[Outcome]) -> String {
+    let mut out = String::new();
+    for outcome in outcomes.iter().filter(|o| !o.translation.is_empty() && o.chrf.score() < FAR_CHRF) {
+        let pad = " ".repeat(outcome.case.id.chars().count());
+        let _ = writeln!(out, "{}  heard:     {}", outcome.case.id, outcome.heard);
+        let _ = writeln!(out, "{pad}  got:       {}", outcome.translation);
+        let _ = writeln!(out, "{pad}  reference: {}", outcome.case.reference);
     }
     out
 }
@@ -530,12 +564,12 @@ fn quoted(text: &str) -> String {
     out
 }
 
-pub fn json(backend: &str, whisper: &str, rows: &[Summary], outcomes: &[Outcome]) -> String {
+pub fn json(backend: &str, whisper: &str, translator: &str, rows: &[Summary], outcomes: &[Outcome]) -> String {
     let summaries: Vec<String> = rows
         .iter()
         .map(|row| {
             format!(
-                "{{\"pair\":{},\"n\":{},\"wer\":{:.2},\"chrf\":{:.2},\"chrf_text\":{:.2},\"listen_ms\":{},\"translate_ms\":{},\"speak_ms\":{},\"total_p50_ms\":{},\"total_p90_ms\":{}}}",
+                "{{\"pair\":{},\"n\":{},\"wer\":{:.2},\"chrf\":{:.2},\"chrf_text\":{:.2},\"listen_ms\":{},\"translate_ms\":{},\"speak_ms\":{},\"voice_p50_ms\":{},\"total_p50_ms\":{},\"total_p90_ms\":{}}}",
                 quoted(&row.label),
                 row.count,
                 row.word_error_rate,
@@ -544,6 +578,7 @@ pub fn json(backend: &str, whisper: &str, rows: &[Summary], outcomes: &[Outcome]
                 row.listen_ms,
                 row.translate_ms,
                 row.speak_ms,
+                row.voice_p50_ms,
                 row.total_p50_ms,
                 row.total_p90_ms
             )
@@ -553,7 +588,7 @@ pub fn json(backend: &str, whisper: &str, rows: &[Summary], outcomes: &[Outcome]
         .iter()
         .map(|o| {
             format!(
-                "{{\"id\":{},\"recorded\":{},\"heard\":{},\"translation\":{},\"word_errors\":{},\"words\":{},\"chrf\":{:.2},\"total_ms\":{}}}",
+                "{{\"id\":{},\"recorded\":{},\"heard\":{},\"translation\":{},\"word_errors\":{},\"words\":{},\"chrf\":{:.2},\"voice_ms\":{},\"total_ms\":{}}}",
                 quoted(&o.case.id),
                 o.recorded,
                 quoted(&o.heard),
@@ -561,14 +596,16 @@ pub fn json(backend: &str, whisper: &str, rows: &[Summary], outcomes: &[Outcome]
                 o.word_errors.0,
                 o.word_errors.1,
                 o.chrf.score(),
+                o.voice_ms,
                 o.total_ms()
             )
         })
         .collect();
     format!(
-        "{{\"backend\":{},\"whisper\":{},\"summary\":[{}],\"cases\":[{}]}}\n",
+        "{{\"backend\":{},\"whisper\":{},\"translator\":{},\"summary\":[{}],\"cases\":[{}]}}\n",
         quoted(backend),
         quoted(whisper),
+        quoted(translator),
         summaries.join(","),
         cases.join(",")
     )
@@ -687,13 +724,15 @@ mod tests {
         assert_eq!(cases.len(), 3);
         let outcomes: Vec<Outcome> = cases.iter().map(|case| measure(&engine, case, None).unwrap()).collect();
         assert!(outcomes.iter().all(|o| o.word_errors.0 == 0 && !o.recorded), "{outcomes:?}");
+        assert!(outcomes.iter().all(|o| o.voice_ms <= o.total_ms() + 1), "{outcomes:?}");
         let rows = summaries(&outcomes);
         assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["en-fr", "fr-en", "all"]);
         assert_eq!(rows[2].count, 3);
         assert!((rows[0].chrf - 100.0).abs() < 1e-9);
         assert!(table(&rows).contains("en-fr"));
         assert!(misheard(&outcomes).is_empty());
-        assert!(json("sim", "small", &rows, &outcomes).contains("\"pair\":\"all\""));
+        assert!(json("sim", "small", "opus", &rows, &outcomes).contains("\"pair\":\"all\""));
+        assert!(mistranslated(&outcomes).is_empty());
     }
 
     #[test]
@@ -712,7 +751,9 @@ mod tests {
         assert!(outcome.recorded);
         assert_eq!(outcome.heard, "thanks");
         assert_eq!(outcome.word_errors, (1, 1));
-        assert!(misheard(&[outcome]).contains("heard: thanks"));
+        assert!(misheard(std::slice::from_ref(&outcome)).contains("heard: thanks"));
+        let far = mistranslated(&[outcome]);
+        assert!(far.contains("got:       merci") && far.contains("reference: bonjour"), "{far}");
     }
 
     #[test]

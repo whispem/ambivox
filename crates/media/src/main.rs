@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ambivox_dsp::kernels;
 use ambivox_dsp::resample::resample;
-use ambivox_engine::{ASR_SAMPLE_RATE, Engine};
+use ambivox_engine::{ASR_SAMPLE_RATE, Engine, Options};
 use ambivox_media::codec::{self, Decoder, Encoder, SAMPLE_RATE};
 use ambivox_media::pipeline::{Config, Pipeline};
 use ambivox_media::{bench, log, server, wav};
@@ -18,21 +18,24 @@ ambivox-media — real-time speech translation engine
 
 USAGE:
     ambivox-media serve  [--socket PATH] [--backend sim|sussurro] [--models DIR] [--whisper NAME]
-                         [--workers N] [--threads N] [--bitrate BPS] [--partials-ms MS]
-                         [--early-words N]
+                         [--translator NAME] [--workers N] [--threads N] [--bitrate BPS]
+                         [--partials-ms MS] [--early-words N]
     ambivox-media synth  --text TEXT --lang LANG (--out FILE | --wav FILE)
                          [--backend ...] [--models DIR]
     ambivox-media listen --lang LANG (--in FILE | --wav FILE)
                          [--backend ...] [--models DIR] [--whisper NAME]
     ambivox-media bench  [--set FILE] [--recordings DIR] [--only PAIR] [--json FILE]
-                         [--backend ...] [--models DIR] [--whisper NAME] [--threads N]
+                         [--backend ...] [--models DIR] [--whisper NAME] [--translator NAME]
+                         [--threads N]
     ambivox-media info
 
 `synth` speaks TEXT and stores it as length-prefixed Opus packets (--out) or as
 a 48 kHz WAV file (--wav). `listen` transcribes either format.
 `--partials-ms` sets how often live captions are refreshed while someone is
 speaking (default 800; 0 turns them off). `--whisper` picks the recognition
-model, ggml-NAME.bin in the model directory (default small). `--early-words`
+model, ggml-NAME.bin in the model directory (default small). `--translator`
+picks the translation model: opus (default) for the per-pair models, or NAME
+for NAME.gguf in the model directory, run with llama.cpp. `--early-words`
 is how many settled words a stream opened in headphones mode speaks before the
 sentence ends, when no comma comes first (default 8).
 `bench` runs each sentence of a set (default bench/sentences.txt) through
@@ -77,7 +80,13 @@ impl Args {
     fn engine(&self) -> Result<Engine, Failure> {
         let backend = self.get("backend").unwrap_or("sim");
         let models = self.get("models").map(Path::new);
-        Ok(Engine::open(backend, models, self.get("whisper"), self.number("threads", 4)?)?)
+        let options = Options {
+            model_dir: models,
+            asr_model: self.get("whisper"),
+            translator: self.get("translator"),
+            threads: self.number("threads", 4)?,
+        };
+        Ok(Engine::open(backend, &options)?)
     }
 }
 
@@ -167,7 +176,11 @@ fn run_bench(args: &Args) -> Result<(), Failure> {
     }
     let recordings = args.get("recordings").map(Path::new);
     let engine = args.engine()?;
-    let whisper = if engine.backend() == "sim" { "-" } else { args.get("whisper").unwrap_or("small") };
+    let (whisper, translator) = if engine.backend() == "sim" {
+        ("-", "-")
+    } else {
+        (args.get("whisper").unwrap_or("small"), args.get("translator").unwrap_or("opus"))
+    };
 
     eprintln!("warming up {} ({} sentences)", engine.backend(), cases.len());
     let skipped = bench::warm_up(&engine, &mut cases);
@@ -184,9 +197,10 @@ fn run_bench(args: &Args) -> Result<(), Failure> {
     let recorded = outcomes.iter().filter(|o| o.recorded).count();
     let rows = bench::summaries(&outcomes);
     println!(
-        "backend {}, whisper {}, {} sentences, {} recorded, {} synthesized\n",
+        "backend {}, whisper {}, translator {}, {} sentences, {} recorded, {} synthesized\n",
         engine.backend(),
         whisper,
+        translator,
         outcomes.len(),
         recorded,
         outcomes.len() - recorded
@@ -202,8 +216,12 @@ fn run_bench(args: &Args) -> Result<(), Failure> {
     if !misheard.is_empty() {
         println!("\nmisheard:\n{misheard}");
     }
+    let mistranslated = bench::mistranslated(&outcomes);
+    if !mistranslated.is_empty() {
+        println!("\nfar from the reference:\n{mistranslated}");
+    }
     if let Some(path) = args.get("json") {
-        std::fs::write(path, bench::json(engine.backend(), whisper, &rows, &outcomes))?;
+        std::fs::write(path, bench::json(engine.backend(), whisper, translator, &rows, &outcomes))?;
     }
     Ok(())
 }

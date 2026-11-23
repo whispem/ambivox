@@ -63,6 +63,7 @@ pub struct Stats {
     pub inference_ms: AtomicU64,
     pub partial_ms: AtomicU64,
     pub early_chunks: AtomicU64,
+    pub streamed_clauses: AtomicU64,
 }
 
 impl Stats {
@@ -72,7 +73,7 @@ impl Stats {
                 "{{\"streams\":{},\"packets_in\":{},\"packets_lost\":{},\"packets_dropped\":{},",
                 "\"utterances\":{},\"partials\":{},\"partials_skipped\":{},\"frames_out\":{},",
                 "\"frames_dropped\":{},\"backlog_dropped_ms\":{},\"errors\":{},\"inference_ms\":{},",
-                "\"partial_ms\":{},\"early_chunks\":{}}}"
+                "\"partial_ms\":{},\"early_chunks\":{},\"streamed_clauses\":{}}}"
             ),
             self.streams.load(Ordering::Relaxed),
             self.packets_in.load(Ordering::Relaxed),
@@ -88,6 +89,7 @@ impl Stats {
             self.inference_ms.load(Ordering::Relaxed),
             self.partial_ms.load(Ordering::Relaxed),
             self.early_chunks.load(Ordering::Relaxed),
+            self.streamed_clauses.load(Ordering::Relaxed),
         )
     }
 }
@@ -176,6 +178,21 @@ fn common_prefix(a: &[String], b: &[String]) -> usize {
 
 fn ends_clause(word: &str) -> bool {
     word.ends_with([',', '.', ';', ':', '?', '!'])
+}
+
+pub fn clause_end(text: &str) -> Option<usize> {
+    let (mut words, mut start) = (0, None);
+    for (i, c) in text.char_indices() {
+        if !c.is_whitespace() {
+            start.get_or_insert(i);
+        } else if let Some(begin) = start.take() {
+            words += 1;
+            if words >= CLAUSE_WORDS && ends_clause(&text[begin..i]) {
+                return Some(i);
+            }
+        }
+    }
+    None
 }
 
 #[derive(Default)]
@@ -442,10 +459,7 @@ impl Pipeline {
             if let Some(chunk) = chunk {
                 let translated = self.engine.translate(&chunk, &shared.source, &shared.target)?;
                 if !translated.trim().is_empty() {
-                    let audio = self.engine.synthesize(translated.trim(), &shared.target)?;
-                    let mut speech = resample(&audio.samples, audio.sample_rate, SAMPLE_RATE);
-                    speech.resize(speech.len() + SAMPLE_RATE as usize * CHUNK_GAP_MS / 1000, 0.0);
-                    self.enqueue(shared, &speech);
+                    self.say(shared, translated.trim(), CHUNK_GAP_MS)?;
                     self.stats.early_chunks.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -484,16 +498,9 @@ impl Pipeline {
             let heard = self.engine.transcribe(&job.pcm, &shared.source)?;
             let heard = heard.trim();
             if heard.is_empty() {
-                return Ok(None);
+                return Ok(());
             }
             caption(CaptionKind::Source, heard);
-
-            let translated = self.engine.translate(heard, &shared.source, &shared.target)?;
-            let translated = translated.trim();
-            if translated.is_empty() {
-                return Ok(None);
-            }
-            caption(CaptionKind::Translation, translated);
 
             let rest = shared.early.as_ref().map_or(heard, |early| {
                 let mut early = early.lock().unwrap();
@@ -503,31 +510,77 @@ impl Pipeline {
                 rest
             });
             if rest == heard {
-                return self.engine.synthesize(translated, &shared.target).map(Some);
+                return self.interpret_aloud(shared, heard, &caption);
             }
+
+            let translated = self.engine.translate(heard, &shared.source, &shared.target)?;
+            if translated.trim().is_empty() {
+                return Ok(());
+            }
+            caption(CaptionKind::Translation, translated.trim());
             if rest.is_empty() {
-                return Ok(None);
+                return Ok(());
             }
-            let rest = self.engine.translate(rest, &shared.source, &shared.target)?;
-            match rest.trim() {
-                "" => Ok(None),
-                rest => self.engine.synthesize(rest, &shared.target).map(Some),
+            match self.engine.translate(rest, &shared.source, &shared.target)?.trim() {
+                "" => Ok(()),
+                rest => self.say(shared, rest, UTTERANCE_GAP_MS),
             }
         })();
         self.stats.inference_ms.fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
 
-        match result {
-            Ok(Some(audio)) => {
-                let mut speech = resample(&audio.samples, audio.sample_rate, SAMPLE_RATE);
-                speech.resize(speech.len() + SAMPLE_RATE as usize * UTTERANCE_GAP_MS / 1000, 0.0);
-                self.enqueue(shared, &speech);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                shared.emit(Frame::Error { stream: shared.id, message: error.to_string() }, &self.stats);
-            }
+        if let Err(error) = result {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            shared.emit(Frame::Error { stream: shared.id, message: error.to_string() }, &self.stats);
         }
+    }
+
+    fn interpret_aloud(
+        &self,
+        shared: &Shared,
+        heard: &str,
+        caption: &dyn Fn(CaptionKind, &str),
+    ) -> Result<(), ambivox_engine::Error> {
+        thread::scope(|scope| {
+            let (clauses, said) = mpsc::channel::<(String, usize)>();
+            let voice = scope.spawn(move || {
+                said.into_iter().try_for_each(|(text, gap): (String, usize)| self.say(shared, &text, gap))
+            });
+
+            let (mut so_far, mut spoken) = (String::new(), 0);
+            let translated = self.engine.translate_with(heard, &shared.source, &shared.target, |text| {
+                while let Some(end) = text.get(spoken..).and_then(clause_end) {
+                    let _ = clauses.send((text[spoken..spoken + end].trim().to_string(), CHUNK_GAP_MS));
+                    self.stats.streamed_clauses.fetch_add(1, Ordering::Relaxed);
+                    spoken += end;
+                }
+                so_far.replace_range(.., text);
+            });
+            let translated = match translated {
+                Ok(translated) => translated,
+                Err(error) => {
+                    drop(clauses);
+                    let _ = voice.join();
+                    return Err(error);
+                }
+            };
+            if !translated.trim().is_empty() {
+                caption(CaptionKind::Translation, translated.trim());
+            }
+            let rest = if spoken == 0 { translated.trim() } else { so_far.get(spoken..).unwrap_or("").trim() };
+            if !rest.is_empty() {
+                let _ = clauses.send((rest.to_string(), UTTERANCE_GAP_MS));
+            }
+            drop(clauses);
+            voice.join().unwrap_or(Ok(()))
+        })
+    }
+
+    fn say(&self, shared: &Shared, text: &str, gap_ms: usize) -> Result<(), ambivox_engine::Error> {
+        let audio = self.engine.synthesize(text, &shared.target)?;
+        let mut speech = resample(&audio.samples, audio.sample_rate, SAMPLE_RATE);
+        speech.resize(speech.len() + SAMPLE_RATE as usize * gap_ms / 1000, 0.0);
+        self.enqueue(shared, &speech);
+        Ok(())
     }
 
     fn enqueue(&self, shared: &Shared, speech: &[f32]) {
@@ -875,6 +928,36 @@ mod tests {
         let words = |text: &str| text.replace(',', " ").split_whitespace().map(str::to_string).collect::<Vec<_>>();
         let expected = engine.translate(sentence, "en", "fr").unwrap();
         assert_eq!(words(&understand(&engine, &packets, "fr")), words(&expected));
+    }
+
+    #[test]
+    fn long_translations_are_spoken_clause_by_clause() {
+        let engine = Engine::sim();
+        let pipeline = pipeline(false);
+        let (sink, frames) = mpsc::sync_channel(4096);
+        let stream = pipeline.open(12, "en", "fr", false, sink).unwrap();
+        let sentence = "thanks my friend, hello and water. the sea and house";
+        play(&stream, spoken(&engine, sentence, "en"), false);
+        stream.close();
+
+        let heard = collect(frames);
+        assert!(heard.errors.is_empty(), "{:?}", heard.errors);
+        let expected = engine.translate(sentence, "en", "fr").unwrap();
+        assert_eq!(heard.captions[1], (CaptionKind::Translation, 0, expected.clone()));
+        assert_eq!(pipeline.stats().streamed_clauses.load(Ordering::Relaxed), 2);
+        let words =
+            |text: &str| text.replace([',', '.'], " ").split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(words(&understand(&engine, &heard.packets, "fr")), words(&expected));
+    }
+
+    #[test]
+    fn clauses_end_after_a_few_words_and_a_mark() {
+        assert_eq!(clause_end("Hello, how are you?"), None);
+        assert_eq!(clause_end("Hello, how are you? Fine"), Some(19));
+        assert_eq!(clause_end("I am late, sorry"), Some(10));
+        assert_eq!(clause_end("I am late,"), None);
+        assert_eq!(clause_end("Ça a l'air super. Je"), Some(18));
+        assert_eq!(clause_end("at 6:00 in the morning"), None);
     }
 
     #[test]
