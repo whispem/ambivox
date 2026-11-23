@@ -58,6 +58,11 @@ public:
 
     std::string translate(const std::string & text, const std::string & source,
                           const std::string & target) override {
+        return translate_stream(text, source, target, {});
+    }
+
+    std::string translate_stream(const std::string & text, const std::string & source,
+                                 const std::string & target, const TextFn & on_text) override {
         const int from = language_index(source);
         const int to = language_index(target);
         if (from == to) return text;
@@ -66,6 +71,7 @@ public:
         while (in >> word) {
             if (!out.empty()) out += ' ';
             out += translate_word(word, from, to);
+            if (on_text) on_text(out);
         }
         return out;
     }

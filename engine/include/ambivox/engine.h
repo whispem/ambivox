@@ -31,6 +31,9 @@ typedef struct ambivox_config {
     int threads;
     /* Whisper model name, for ggml-<name>.bin in model_dir; NULL means "small". */
     const char * asr_model;
+    /* Translation model: "opus" for the per-pair Marian models, or a name for
+       <name>.gguf in model_dir run with llama.cpp. NULL means "opus". */
+    const char * translator;
 } ambivox_config;
 
 AMBIVOX_API ambivox_engine * ambivox_engine_open(const ambivox_config * config);
@@ -42,6 +45,14 @@ AMBIVOX_API int ambivox_transcribe(ambivox_engine * engine, const float * pcm, s
 
 AMBIVOX_API int ambivox_translate(ambivox_engine * engine, const char * text,
                       const char * source, const char * target, char ** out);
+
+/* Called with the translation so far each time it grows; the text is valid
+   only during the call. */
+typedef void (*ambivox_text_fn)(void * user, const char * text);
+
+AMBIVOX_API int ambivox_translate_stream(ambivox_engine * engine, const char * text, const char * source,
+                                         const char * target, ambivox_text_fn on_text, void * user,
+                                         char ** out);
 
 AMBIVOX_API int ambivox_synthesize(ambivox_engine * engine, const char * text, const char * lang,
                        float ** pcm, size_t * n, int * sample_rate);

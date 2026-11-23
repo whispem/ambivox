@@ -20,6 +20,7 @@ mod ffi {
         pub model_dir: *const c_char,
         pub threads: c_int,
         pub asr_model: *const c_char,
+        pub translator: *const c_char,
     }
 
     unsafe extern "C" {
@@ -38,6 +39,15 @@ mod ffi {
             text: *const c_char,
             source: *const c_char,
             target: *const c_char,
+            out: *mut *mut c_char,
+        ) -> c_int;
+        pub fn ambivox_translate_stream(
+            engine: *mut Engine,
+            text: *const c_char,
+            source: *const c_char,
+            target: *const c_char,
+            on_text: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+            user: *mut c_void,
             out: *mut *mut c_char,
         ) -> c_int;
         pub fn ambivox_synthesize(
@@ -91,19 +101,35 @@ pub struct Engine {
 unsafe impl Send for Engine {}
 unsafe impl Sync for Engine {}
 
+#[derive(Clone, Copy, Debug)]
+pub struct Options<'a> {
+    pub model_dir: Option<&'a Path>,
+    pub asr_model: Option<&'a str>,
+    pub translator: Option<&'a str>,
+    pub threads: usize,
+}
+
+impl Default for Options<'_> {
+    fn default() -> Self {
+        Self { model_dir: None, asr_model: None, translator: None, threads: 4 }
+    }
+}
+
 impl Engine {
-    pub fn open(backend: &str, model_dir: Option<&Path>, asr_model: Option<&str>, threads: usize) -> Result<Self> {
+    pub fn open(backend: &str, options: &Options) -> Result<Self> {
         let backend = cstring(backend)?;
-        let model_dir = match model_dir {
+        let model_dir = match options.model_dir {
             Some(path) => Some(cstring(&path.to_string_lossy())?),
             None => None,
         };
-        let asr_model = asr_model.map(cstring).transpose()?;
+        let asr_model = options.asr_model.map(cstring).transpose()?;
+        let translator = options.translator.map(cstring).transpose()?;
         let config = ffi::Config {
             backend: backend.as_ptr(),
             model_dir: model_dir.as_ref().map_or(ptr::null(), |d| d.as_ptr()),
-            threads: threads.min(c_int::MAX as usize) as c_int,
+            threads: options.threads.min(c_int::MAX as usize) as c_int,
             asr_model: asr_model.as_ref().map_or(ptr::null(), |m| m.as_ptr()),
+            translator: translator.as_ref().map_or(ptr::null(), |m| m.as_ptr()),
         };
         // SAFETY: `config` and the strings it points to outlive the call.
         let raw = unsafe { ffi::ambivox_engine_open(&config) };
@@ -118,7 +144,8 @@ impl Engine {
     }
 
     pub fn sim() -> Self {
-        Self::open("sim", None, None, 1).expect("the simulated backend is always available")
+        Self::open("sim", &Options { threads: 1, ..Options::default() })
+            .expect("the simulated backend is always available")
     }
 
     pub fn backend(&self) -> &str {
@@ -141,6 +168,37 @@ impl Engine {
         // SAFETY: all inputs are NUL-terminated and `out` receives an engine-owned string.
         let status = unsafe {
             ffi::ambivox_translate(self.raw.as_ptr(), text.as_ptr(), source.as_ptr(), target.as_ptr(), &mut out)
+        };
+        take_string(status, out)
+    }
+
+    pub fn translate_with<F: FnMut(&str)>(
+        &self,
+        text: &str,
+        source: &str,
+        target: &str,
+        mut on_text: F,
+    ) -> Result<String> {
+        unsafe extern "C" fn grown<F: FnMut(&str)>(user: *mut c_void, text: *const c_char) {
+            // SAFETY: `user` is the `F` passed below, alive for the whole call, and `text` is NUL-terminated.
+            let (on_text, text) = unsafe { (&mut *user.cast::<F>(), CStr::from_ptr(text)) };
+            if let Ok(text) = text.to_str() {
+                on_text(text);
+            }
+        }
+        let (text, source, target) = (cstring(text)?, cstring(source)?, cstring(target)?);
+        let mut out = ptr::null_mut();
+        // SAFETY: as in `translate`; the callback only runs during the call, on this thread.
+        let status = unsafe {
+            ffi::ambivox_translate_stream(
+                self.raw.as_ptr(),
+                text.as_ptr(),
+                source.as_ptr(),
+                target.as_ptr(),
+                Some(grown::<F>),
+                (&raw mut on_text).cast(),
+                &mut out,
+            )
         };
         take_string(status, out)
     }
@@ -224,11 +282,21 @@ mod tests {
     }
 
     #[test]
+    fn translations_can_be_followed_as_they_grow() {
+        let engine = Engine::sim();
+        let mut grown = Vec::new();
+        let translated = engine.translate_with("hello my friend", "en", "fr", |text| grown.push(text.to_string()));
+        assert_eq!(translated.unwrap(), "bonjour my ami");
+        assert_eq!(grown, ["bonjour", "bonjour my", "bonjour my ami"]);
+        assert!(matches!(engine.translate_with("hello", "en", "de", |_| {}), Err(Error::Unsupported(_))));
+    }
+
+    #[test]
     fn errors_are_typed() {
         let engine = Engine::sim();
         assert!(matches!(engine.translate("hello", "en", "de"), Err(Error::Unsupported(m)) if m.contains("de")));
         assert!(matches!(engine.translate("a\0b", "en", "fr"), Err(Error::Argument(_))));
-        assert!(matches!(Engine::open("nope", None, None, 1), Err(Error::Unsupported(_))));
+        assert!(matches!(Engine::open("nope", &Options::default()), Err(Error::Unsupported(_))));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 #include "backend.h"
+#include "llama_translator.h"
 
 #include <cctype>
 #include <cstring>
@@ -107,13 +108,19 @@ std::string trim(const std::string & s) {
 
 class SussurroBackend final : public Backend {
 public:
-    SussurroBackend(const std::string & model_dir, int threads, const std::string & asr_model)
-        : dir_(model_dir), whisper_model_("ggml-" + asr_model + ".bin"), threads_(threads > 0 ? threads : 4) {
+    SussurroBackend(const std::string & model_dir, int threads, const std::string & asr_model,
+                    const std::string & translator)
+        : dir_(model_dir),
+          whisper_model_("ggml-" + asr_model + ".bin"),
+          llm_model_(translator == "opus" ? "" : translator + ".gguf"),
+          threads_(threads > 0 ? threads : 4) {
         if (!fs::is_directory(dir_)) throw ModelError("model directory not found: " + model_dir);
         if (!valid_model_name(asr_model)) throw ModelError("invalid whisper model name: " + asr_model);
+        if (!valid_model_name(translator)) throw ModelError("invalid translation model name: " + translator);
     }
 
     ~SussurroBackend() override {
+        llm_.reset();
         translators_.clear();
         voices_.clear();
         if (whisper_ != nullptr) whisper_free(whisper_);
@@ -152,9 +159,16 @@ public:
         return trim(text);
     }
 
+    std::string translate_stream(const std::string & text, const std::string & source,
+                                 const std::string & target, const TextFn & on_text) override {
+        if (llm_model_.empty() || source == target || text.empty()) return translate(text, source, target);
+        return trim(llm().translate(text, source, target, on_text));
+    }
+
     std::string translate(const std::string & text, const std::string & source,
                           const std::string & target) override {
         if (source == target || text.empty()) return text;
+        if (!llm_model_.empty()) return trim(llm().translate(text, source, target));
         const Route * route = nullptr;
         for (const Route & r : kRoutes) {
             if (source == r.source && target == r.target) route = &r;
@@ -187,6 +201,16 @@ public:
     }
 
 private:
+    LlamaTranslator & llm() {
+        std::lock_guard<std::mutex> lock(registry_mutex_);
+        if (llm_ == nullptr) {
+            const std::string path = (dir_ / llm_model_).string();
+            if (!fs::exists(path)) throw ModelError("translation model not found: " + path);
+            llm_ = std::make_unique<LlamaTranslator>(path, threads_);
+        }
+        return *llm_;
+    }
+
     Translator & translator(const std::string & file) {
         std::lock_guard<std::mutex> lock(registry_mutex_);
         auto it = translators_.find(file);
@@ -239,19 +263,21 @@ private:
 
     fs::path dir_;
     std::string whisper_model_;
+    std::string llm_model_;
     int threads_;
     whisper_context * whisper_ = nullptr;
     std::mutex whisper_mutex_;
     std::mutex registry_mutex_;
     std::map<std::string, std::unique_ptr<Translator>> translators_;
     std::map<std::string, std::unique_ptr<Voice>> voices_;
+    std::unique_ptr<LlamaTranslator> llm_;
 };
 
 }
 
 std::unique_ptr<Backend> make_sussurro_backend(const std::string & model_dir, int threads,
-                                               const std::string & asr_model) {
-    return std::make_unique<SussurroBackend>(model_dir, threads, asr_model);
+                                               const std::string & asr_model, const std::string & translator) {
+    return std::make_unique<SussurroBackend>(model_dir, threads, asr_model, translator);
 }
 
 }

@@ -126,6 +126,18 @@ void test_engine_pipeline() {
     CHECK(std::strcmp(translated, "ciao amico") == 0);
     ambivox_free(translated);
 
+    std::vector<std::string> grown;
+    const ambivox_text_fn collect = [](void * user, const char * so_far) {
+        static_cast<std::vector<std::string> *>(user)->push_back(so_far);
+    };
+    CHECK(ambivox_translate_stream(engine, "hola amigo", "es", "it", collect, &grown, &translated) == AMBIVOX_OK);
+    CHECK(std::strcmp(translated, "ciao amico") == 0);
+    CHECK(grown == std::vector<std::string>({"ciao", "ciao amico"}));
+    ambivox_free(translated);
+    CHECK(ambivox_translate_stream(engine, "hola amigo", "es", "it", nullptr, nullptr, &translated) == AMBIVOX_OK);
+    CHECK(std::strcmp(translated, "ciao amico") == 0);
+    ambivox_free(translated);
+
     ambivox_engine_close(engine);
 }
 

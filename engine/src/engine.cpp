@@ -60,7 +60,8 @@ ambivox_engine * ambivox_engine_open(const ambivox_config * config) {
 #ifdef AMBIVOX_WITH_SUSSURRO
             if (config->model_dir == nullptr) throw ambivox::ModelError("the sussurro backend needs a model directory");
             impl = ambivox::make_sussurro_backend(config->model_dir, config->threads,
-                                                  config->asr_model != nullptr ? config->asr_model : "small");
+                                                  config->asr_model != nullptr ? config->asr_model : "small",
+                                                  config->translator != nullptr ? config->translator : "opus");
 #else
             throw ambivox::Unsupported("built without the sussurro backend");
 #endif
@@ -93,6 +94,19 @@ int ambivox_translate(ambivox_engine * engine, const char * text, const char * s
     }
     *out = nullptr;
     return guarded([&] { *out = copy_string(engine->backend->translate(text, source, target)); });
+}
+
+int ambivox_translate_stream(ambivox_engine * engine, const char * text, const char * source, const char * target,
+                             ambivox_text_fn on_text, void * user, char ** out) {
+    if (engine == nullptr || text == nullptr || source == nullptr || target == nullptr || out == nullptr) {
+        return fail(AMBIVOX_ERR_ARGUMENT, "invalid argument");
+    }
+    *out = nullptr;
+    return guarded([&] {
+        ambivox::TextFn report;
+        if (on_text != nullptr) report = [&](const std::string & so_far) { on_text(user, so_far.c_str()); };
+        *out = copy_string(engine->backend->translate_stream(text, source, target, report));
+    });
 }
 
 int ambivox_synthesize(ambivox_engine * engine, const char * text, const char * lang, float ** pcm, size_t * n,
