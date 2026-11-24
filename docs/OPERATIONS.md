@@ -51,7 +51,7 @@ which file is missing. To use a model directory that already exists on the
 machine instead, set `AMBIVOX_MODELS=./models` in `.env`.
 
 The images come from `ghcr.io/whispem/ambivox`, built for x86-64 and arm64 at
-every release: `0.7` (and `latest`) for ambivox itself, `0.7-models` for the
+every release: `0.8` (and `latest`) for ambivox itself, `0.8-models` for the
 model setup. `AMBIVOX_VERSION` picks another release. To build them from the
 sources instead, add the second compose file:
 
@@ -86,7 +86,7 @@ ambivox -listen :8443 -tls-self-signed -udp-port 8443 -data-dir ~/.ambivox
 The server prints the addresses to open, for instance:
 
 ~~~text
-ambivox 0.7.0 is ready. Open this on any device on the same network:
+ambivox 0.8.0 is ready. Open this on any device on the same network:
   https://192.168.1.20:8443
   https://localhost:8443
 The certificate is self-signed: each browser asks once to trust it. Its fingerprint is

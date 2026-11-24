@@ -1,6 +1,6 @@
 name: ambivox
 
-x-image: &image ghcr.io/whispem/ambivox:${AMBIVOX_VERSION:-0.7}
+x-image: &image ghcr.io/whispem/ambivox:${AMBIVOX_VERSION:-0.8}
 
 services:
   media:
@@ -32,7 +32,7 @@ services:
       - data:/data
 
   models:
-    image: ghcr.io/whispem/ambivox:${AMBIVOX_VERSION:-0.7}-models
+    image: ghcr.io/whispem/ambivox:${AMBIVOX_VERSION:-0.8}-models
     profiles: [setup]
     environment:
       AMBIVOX_PROFILE: ${AMBIVOX_PROFILE:-balanced}

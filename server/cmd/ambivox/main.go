@@ -28,7 +28,7 @@ import (
 	"github.com/whispem/ambivox/server/web"
 )
 
-var version = "0.7.0"
+var version = "0.8.0"
 
 type options struct {
 	listen      string

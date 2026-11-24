@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
 
 - Model profiles pick every model in one setting: `light` (whisper base,
   opus), `balanced` (whisper small, opus; the default) and `quality` (whisper
