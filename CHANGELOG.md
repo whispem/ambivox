@@ -9,6 +9,9 @@
   and `--translator` still override either. The setup script downloads
   TranslateGemma for the quality profile and checks it against a pinned
   checksum. New `make models`.
+- `--threads` defaults to the cores available divided by the workers, at most
+  8, instead of 4. On a CPU, whisper small went from 1.57 s to 0.97 s per
+  sentence.
 
 ## 0.7.0
 

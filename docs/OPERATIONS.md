@@ -228,7 +228,7 @@ Every flag has an environment variable; flags win.
 | `--backend` | `sim` | `sim` or `sussurro` |
 | `--models` | none | model directory, required by `sussurro` |
 | `--workers` | `2` | utterances interpreted in parallel |
-| `--threads` | `4` | threads each model may use |
+| `--threads` | cores ÷ workers, at most 8 | threads each model may use |
 | `--bitrate` | `32000` | Opus bitrate of translated speech |
 | `--partials-ms` | `800` | how often live captions are refreshed while someone speaks; `0` turns them off |
 | `--early-words` | `8` | in headphones mode, how many settled words are spoken before the sentence ends when no comma comes first |
@@ -236,8 +236,10 @@ Every flag has an environment variable; flags win.
 | `--whisper` | from the profile | recognition model, `ggml-NAME.bin` in the model directory |
 | `--translator` | from the profile | translation model: `opus` for the per-pair models, or `NAME.gguf` in the model directory, run with llama.cpp |
 
-Budget roughly `workers × threads` cores for inference. With two participants
-talking in turn, one worker is busy at a time.
+Budget roughly `workers × threads` cores for inference; by default the workers
+share the cores. With two participants talking in turn, one worker is busy at a
+time. On a CPU the thread count matters: whisper small took 1.57 s per
+sentence with 4 threads and 0.97 s with 8.
 
 ### Model directory
 
@@ -271,6 +273,18 @@ engine in Docker. `WHISPER` and `TRANSLATOR` (`AMBIVOX_WHISPER` and
 replace either model of a profile. Any model published for whisper.cpp works;
 `medium` sits between `small` and `large-v3-turbo`, and a larger one hears
 accents, names and noisy rooms better.
+
+Measured with `make bench` on an M5 Max, from the end of a sentence to the
+translated voice, at the median:
+
+| Profile | GPU (Metal) | CPU only (Docker, 8 threads) | Words misheard |
+|---|---|---|---|
+| `light` | 124 ms | 344 ms | 6 to 9% |
+| `balanced` | 147 ms | 1.07 s | 2% |
+| `quality` | 508 ms | too slow | 1% |
+
+Without a GPU, `balanced` speaks about a second after each sentence; `light`
+keeps up but mishears more, mostly in French and Italian.
 
 The quality profile translates with TranslateGemma, Google's translation model
 built on Gemma 3, run through llama.cpp. The setup downloads a `Q4_K_M`
@@ -433,8 +447,8 @@ changed, so the certificate was renewed. Give it a fixed address in the
 router.
 
 **Captions appear late.** Look at `ambivox_engine_inference_ms` against
-`ambivox_engine_utterances`. Raise `--threads`, or use quantised translation
-models (see sussurro.cpp).
+`ambivox_engine_utterances`. On a CPU, recognition takes most of that time:
+raise `--threads` if cores sit idle, or switch to the `light` profile.
 
 **Live captions lag or come in bursts.** Each draft re-runs recognition on the
 sentence so far. `partial_ms / partials` is the cost of one draft; if it is

@@ -37,7 +37,8 @@ light (whisper base, opus), balanced (whisper small, opus; the default) or
 quality (whisper large-v3-turbo, translategemma-12b). `--whisper` and
 `--translator` override either: ggml-NAME.bin in the model directory for
 recognition; opus for the per-pair translation models, or NAME for NAME.gguf
-in the model directory, run with llama.cpp. `--early-words`
+in the model directory, run with llama.cpp. `--threads` defaults to the cores
+available divided by the workers, at most 8. `--early-words`
 is how many settled words a stream opened in headphones mode speaks before the
 sentence ends, when no comma comes first (default 8).
 `bench` runs each sentence of a set (default bench/sentences.txt) through
@@ -47,6 +48,8 @@ spoken by the engine's own voice, unless --recordings holds a file named ID.wav.
 ";
 
 type Failure = Box<dyn std::error::Error>;
+
+const MAX_THREADS: usize = 8;
 
 const PROFILES: [(&str, &str, &str); 3] =
     [("light", "base", "opus"), ("balanced", "small", "opus"), ("quality", "large-v3-turbo", "translategemma-12b")];
@@ -95,6 +98,12 @@ impl Args {
         Ok((self.set("whisper").unwrap_or(whisper), self.set("translator").unwrap_or(translator)))
     }
 
+    fn threads(&self) -> Result<usize, Failure> {
+        let workers = self.number("workers", 2usize)?.max(1);
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        self.number("threads", (cores / workers).clamp(1, MAX_THREADS))
+    }
+
     fn engine(&self) -> Result<Engine, Failure> {
         let backend = self.get("backend").unwrap_or("sim");
         let (whisper, translator) = self.models()?;
@@ -102,7 +111,7 @@ impl Args {
             model_dir: self.get("models").map(Path::new),
             asr_model: Some(whisper),
             translator: Some(translator),
-            threads: self.number("threads", 4)?,
+            threads: self.threads()?,
         };
         Ok(Engine::open(backend, &options)?)
     }
@@ -120,7 +129,7 @@ fn serve(args: &Args) -> Result<(), Failure> {
     let engine = Arc::new(args.engine()?);
     if engine.backend() != "sim" {
         let (whisper, translator) = args.models()?;
-        log::info(&format!("models: whisper {whisper}, translator {translator}"));
+        log::info(&format!("models: whisper {whisper}, translator {translator}, {} threads", args.threads()?));
     }
     engine
         .transcribe(&vec![0.0; 2 * ASR_SAMPLE_RATE as usize], "en")
@@ -295,6 +304,15 @@ mod tests {
         assert_eq!(args(&["--profile", "light", "--whisper", "small"]).models().unwrap(), ("small", "opus"));
         assert_eq!(args(&["--profile", "", "--translator", ""]).models().unwrap(), ("small", "opus"));
         assert!(args(&["--profile", "huge"]).models().is_err());
+    }
+
+    #[test]
+    fn threads_share_the_cores_between_workers() {
+        let cores = std::thread::available_parallelism().unwrap().get();
+        assert_eq!(args(&["--threads", "3"]).threads().unwrap(), 3);
+        assert_eq!(args(&["--workers", "1"]).threads().unwrap(), cores.clamp(1, MAX_THREADS));
+        assert_eq!(args(&["--workers", "999"]).threads().unwrap(), 1);
+        assert!(args(&["--threads", "many"]).threads().is_err());
     }
 
     #[test]
