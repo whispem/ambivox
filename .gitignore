@@ -2,6 +2,7 @@
 /build/
 /bin/
 /models/
+/recordings/
 /third_party/
 node_modules/
 *.sock

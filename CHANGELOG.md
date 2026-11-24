@@ -17,6 +17,8 @@
   errors. sussurro.cpp moves to a revision that also drops words opus does not
   know instead of writing them as `⁇`. The pinned revisions of sussurro.cpp and
   llama.cpp now take effect in an existing build directory too.
+- `scripts/record-bench.sh LANG` records your voice for the bench, one sentence
+  at a time, into `recordings/`.
 
 ## 0.7.0
 

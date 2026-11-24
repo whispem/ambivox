@@ -284,7 +284,9 @@ translated voice, at the median:
 | `quality` | 508 ms | too slow | 1% |
 
 Without a GPU, `balanced` speaks about a second after each sentence; `light`
-keeps up but mishears more, mostly in French and Italian.
+keeps up but mishears more, mostly in French and Italian. These figures come
+from the synthetic voices; read aloud by a person, the French sentences were
+misheard at 1.8% with `balanced` and 1.2% with `quality`.
 
 The quality profile translates with TranslateGemma, Google's translation model
 built on Gemma 3, run through llama.cpp. The setup downloads a `Q4_K_M`
@@ -333,9 +335,14 @@ through the engine, one after the other, and prints a table per language pair:
 Sentences recognition got wrong are listed below the table, with what was said
 and what was heard. By default each sentence is spoken by the engine's own Piper
 voice, which is clearer than a person in a room, so recognition looks better
-than it is. For real figures, record yourself: one 16-bit mono WAV per sentence,
-named after its id, in a directory given with `--recordings`. On a Mac, a voice
-memo converts with `afconvert -f WAVE -d LEI16@16000 -c 1 memo.m4a fr-en-01.wav`.
+than it is. For real figures, record yourself: `scripts/record-bench.sh fr`
+shows each sentence of the set spoken in French, records it while you read it
+aloud and saves it in `recordings/`, which git ignores. It needs sox
+(`brew install sox` or `apt install sox`), skips what is already recorded so it
+can be stopped and run again, and records once a sentence shared by several
+pairs. Then `make bench BACKEND=sussurro BENCH_ARGS="--recordings recordings"`.
+Any 16-bit mono WAV named after a sentence id works too; on a Mac, a voice memo
+converts with `afconvert -f WAVE -d LEI16@16000 -c 1 memo.m4a fr-en-01.wav`.
 Sentences without a recording keep the synthetic voice.
 
 To compare models, run the same set with each and keep the results as JSON:
