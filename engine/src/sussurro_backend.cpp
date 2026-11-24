@@ -2,6 +2,7 @@
 #include "llama_translator.h"
 
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -22,6 +23,10 @@ constexpr int kMaxNewTokens = 256;
 constexpr int kBeamSize = 1;
 constexpr float kNoSpeech = 0.6f;
 constexpr float kLowConfidence = -1.0f;
+
+void quiet(ggml_log_level level, const char * text, void *) {
+    if (level == GGML_LOG_LEVEL_ERROR) fputs(text, stderr);
+}
 
 struct Route {
     const char * source;
@@ -117,6 +122,7 @@ public:
         if (!fs::is_directory(dir_)) throw ModelError("model directory not found: " + model_dir);
         if (!valid_model_name(asr_model)) throw ModelError("invalid whisper model name: " + asr_model);
         if (!valid_model_name(translator)) throw ModelError("invalid translation model name: " + translator);
+        whisper_log_set(quiet, nullptr);
     }
 
     ~SussurroBackend() override {

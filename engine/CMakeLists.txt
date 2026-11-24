@@ -6,10 +6,9 @@ option(AMBIVOX_BUILD_TESTS "Build the engine tests" ON)
 option(AMBIVOX_PORTABLE "Run on any CPU of the target architecture, not only the build machine's" OFF)
 set(AMBIVOX_SHERPA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/sherpa-onnx" CACHE PATH
     "Prebuilt sherpa-onnx C API (include/ and lib/)")
-set(AMBIVOX_SUSSURRO_TAG "298a657fc8710db844e0b82925b9e454b456fa81" CACHE STRING
-    "sussurro.cpp revision")
-set(AMBIVOX_LLAMA_TAG "1868af13ac1c2c6dd5b0dd1a4ac43f6ccc80fd80" CACHE STRING
-    "llama.cpp revision; its ggml must match the one sussurro.cpp pins")
+set(AMBIVOX_SUSSURRO_TAG "559bdbb6124e7b9f8ed63fb15e00bca33c66c4d9")
+# llama.cpp's ggml must be the one sussurro.cpp pins.
+set(AMBIVOX_LLAMA_TAG "1868af13ac1c2c6dd5b0dd1a4ac43f6ccc80fd80")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

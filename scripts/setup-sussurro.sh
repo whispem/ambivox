@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODELS="${AMBIVOX_MODELS:-$ROOT/models}"
 THIRD_PARTY="$ROOT/third_party"
 SHERPA_VERSION="v1.13.8"
-SUSSURRO_REV="298a657fc8710db844e0b82925b9e454b456fa81"
+SUSSURRO_REV="559bdbb6124e7b9f8ed63fb15e00bca33c66c4d9"
 VOICES=(en_US-ryan-medium fr_FR-tom-medium es_ES-davefx-medium it_IT-paola-medium)
 TRANSLATION_MODELS=(
   "Helsinki-NLP/opus-mt-tc-big-itc-itc tc-itc-itc"

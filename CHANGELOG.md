@@ -12,6 +12,11 @@
 - `--threads` defaults to the cores available divided by the workers, at most
   8, instead of 4. On a CPU, whisper small went from 1.57 s to 0.97 s per
   sentence.
+- The engine log keeps to what matters: whisper, ggml and the opus decoder no
+  longer print their loading details and per-sentence statistics, only their
+  errors. sussurro.cpp moves to a revision that also drops words opus does not
+  know instead of writing them as `⁇`. The pinned revisions of sussurro.cpp and
+  llama.cpp now take effect in an existing build directory too.
 
 ## 0.7.0
 
