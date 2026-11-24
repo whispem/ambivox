@@ -17,25 +17,27 @@ const USAGE: &str = "\
 ambivox-media — real-time speech translation engine
 
 USAGE:
-    ambivox-media serve  [--socket PATH] [--backend sim|sussurro] [--models DIR] [--whisper NAME]
-                         [--translator NAME] [--workers N] [--threads N] [--bitrate BPS]
-                         [--partials-ms MS] [--early-words N]
+    ambivox-media serve  [--socket PATH] [--backend sim|sussurro] [--models DIR] [--profile NAME]
+                         [--whisper NAME] [--translator NAME] [--workers N] [--threads N]
+                         [--bitrate BPS] [--partials-ms MS] [--early-words N]
     ambivox-media synth  --text TEXT --lang LANG (--out FILE | --wav FILE)
                          [--backend ...] [--models DIR]
     ambivox-media listen --lang LANG (--in FILE | --wav FILE)
-                         [--backend ...] [--models DIR] [--whisper NAME]
+                         [--backend ...] [--models DIR] [--profile NAME] [--whisper NAME]
     ambivox-media bench  [--set FILE] [--recordings DIR] [--only PAIR] [--json FILE]
-                         [--backend ...] [--models DIR] [--whisper NAME] [--translator NAME]
-                         [--threads N]
+                         [--backend ...] [--models DIR] [--profile NAME] [--whisper NAME]
+                         [--translator NAME] [--threads N]
     ambivox-media info
 
 `synth` speaks TEXT and stores it as length-prefixed Opus packets (--out) or as
 a 48 kHz WAV file (--wav). `listen` transcribes either format.
 `--partials-ms` sets how often live captions are refreshed while someone is
-speaking (default 800; 0 turns them off). `--whisper` picks the recognition
-model, ggml-NAME.bin in the model directory (default small). `--translator`
-picks the translation model: opus (default) for the per-pair models, or NAME
-for NAME.gguf in the model directory, run with llama.cpp. `--early-words`
+speaking (default 800; 0 turns them off). `--profile` picks the models:
+light (whisper base, opus), balanced (whisper small, opus; the default) or
+quality (whisper large-v3-turbo, translategemma-12b). `--whisper` and
+`--translator` override either: ggml-NAME.bin in the model directory for
+recognition; opus for the per-pair translation models, or NAME for NAME.gguf
+in the model directory, run with llama.cpp. `--early-words`
 is how many settled words a stream opened in headphones mode speaks before the
 sentence ends, when no comma comes first (default 8).
 `bench` runs each sentence of a set (default bench/sentences.txt) through
@@ -45,6 +47,9 @@ spoken by the engine's own voice, unless --recordings holds a file named ID.wav.
 ";
 
 type Failure = Box<dyn std::error::Error>;
+
+const PROFILES: [(&str, &str, &str); 3] =
+    [("light", "base", "opus"), ("balanced", "small", "opus"), ("quality", "large-v3-turbo", "translategemma-12b")];
 
 struct Args {
     values: HashMap<String, String>,
@@ -77,13 +82,26 @@ impl Args {
         }
     }
 
+    fn set(&self, name: &str) -> Option<&str> {
+        self.get(name).filter(|value| !value.is_empty())
+    }
+
+    fn models(&self) -> Result<(&str, &str), Failure> {
+        let profile = self.set("profile").unwrap_or("balanced");
+        let (_, whisper, translator) = PROFILES
+            .iter()
+            .find(|(name, ..)| *name == profile)
+            .ok_or_else(|| format!("unknown profile: {profile} (expected light, balanced or quality)"))?;
+        Ok((self.set("whisper").unwrap_or(whisper), self.set("translator").unwrap_or(translator)))
+    }
+
     fn engine(&self) -> Result<Engine, Failure> {
         let backend = self.get("backend").unwrap_or("sim");
-        let models = self.get("models").map(Path::new);
+        let (whisper, translator) = self.models()?;
         let options = Options {
-            model_dir: models,
-            asr_model: self.get("whisper"),
-            translator: self.get("translator"),
+            model_dir: self.get("models").map(Path::new),
+            asr_model: Some(whisper),
+            translator: Some(translator),
             threads: self.number("threads", 4)?,
         };
         Ok(Engine::open(backend, &options)?)
@@ -100,6 +118,10 @@ fn serve(args: &Args) -> Result<(), Failure> {
         ..Config::default()
     };
     let engine = Arc::new(args.engine()?);
+    if engine.backend() != "sim" {
+        let (whisper, translator) = args.models()?;
+        log::info(&format!("models: whisper {whisper}, translator {translator}"));
+    }
     engine
         .transcribe(&vec![0.0; 2 * ASR_SAMPLE_RATE as usize], "en")
         .map_err(|e| format!("speech recognition self-test failed: {e}"))?;
@@ -176,11 +198,7 @@ fn run_bench(args: &Args) -> Result<(), Failure> {
     }
     let recordings = args.get("recordings").map(Path::new);
     let engine = args.engine()?;
-    let (whisper, translator) = if engine.backend() == "sim" {
-        ("-", "-")
-    } else {
-        (args.get("whisper").unwrap_or("small"), args.get("translator").unwrap_or("opus"))
-    };
+    let (whisper, translator) = if engine.backend() == "sim" { ("-", "-") } else { args.models()? };
 
     eprintln!("warming up {} ({} sentences)", engine.backend(), cases.len());
     let skipped = bench::warm_up(&engine, &mut cases);
@@ -258,6 +276,33 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("ambivox-media: {error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Args {
+        Args::parse(list.iter().map(|s| s.to_string())).unwrap()
+    }
+
+    #[test]
+    fn profiles_pick_the_models_and_flags_override_them() {
+        assert_eq!(args(&[]).models().unwrap(), ("small", "opus"));
+        assert_eq!(args(&["--profile", "quality"]).models().unwrap(), ("large-v3-turbo", "translategemma-12b"));
+        assert_eq!(args(&["--profile", "light", "--whisper", "small"]).models().unwrap(), ("small", "opus"));
+        assert_eq!(args(&["--profile", "", "--translator", ""]).models().unwrap(), ("small", "opus"));
+        assert!(args(&["--profile", "huge"]).models().is_err());
+    }
+
+    #[test]
+    fn the_setup_script_knows_the_same_profiles() {
+        let script = include_str!("../../../scripts/setup-sussurro.sh");
+        for (name, whisper, translator) in PROFILES {
+            let line = format!("{name}) WHISPER={whisper} TRANSLATOR={translator} ;;");
+            assert!(script.contains(&line), "scripts/setup-sussurro.sh lacks: {line}");
         }
     }
 }

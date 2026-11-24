@@ -7,8 +7,8 @@ services:
     image: *image
     restart: unless-stopped
     command: ["ambivox-media", "serve", "--socket", "/run/ambivox/media.sock", "--backend", "${AMBIVOX_BACKEND:-sussurro}",
-              "--models", "/models", "--whisper", "${AMBIVOX_WHISPER:-small}",
-              "--translator", "${AMBIVOX_TRANSLATOR:-opus}"]
+              "--models", "/models", "--profile", "${AMBIVOX_PROFILE:-balanced}",
+              "--whisper", "${AMBIVOX_WHISPER:-}", "--translator", "${AMBIVOX_TRANSLATOR:-}"]
     volumes:
       - socket:/run/ambivox
       - ${AMBIVOX_MODELS:-models}:/models:ro
@@ -35,7 +35,9 @@ services:
     image: ghcr.io/whispem/ambivox:${AMBIVOX_VERSION:-0.7}-models
     profiles: [setup]
     environment:
-      AMBIVOX_WHISPER: ${AMBIVOX_WHISPER:-small}
+      AMBIVOX_PROFILE: ${AMBIVOX_PROFILE:-balanced}
+      AMBIVOX_WHISPER: ${AMBIVOX_WHISPER:-}
+      AMBIVOX_TRANSLATOR: ${AMBIVOX_TRANSLATOR:-}
     volumes:
       - ${AMBIVOX_MODELS:-models}:/models
 

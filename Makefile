@@ -4,8 +4,9 @@ CMAKE   ?= cmake
 
 BACKEND ?= sim
 MODELS  ?= models
-WHISPER ?= small
-TRANSLATOR ?= opus
+PROFILE ?= balanced
+WHISPER ?=
+TRANSLATOR ?=
 LISTEN  ?= 127.0.0.1:8080
 SOCKET  ?= /tmp/ambivox-media.sock
 SERVER_FLAGS ?=
@@ -14,12 +15,12 @@ BENCH_ARGS ?=
 MEDIA_BIN  := $(CURDIR)/target/release/ambivox-media
 SERVER_BIN := $(CURDIR)/bin/ambivox
 FEATURES   := $(if $(filter sussurro,$(BACKEND)),--features sussurro,)
-MODEL_ARGS := $(if $(filter sussurro,$(BACKEND)),--models $(MODELS) --whisper $(WHISPER) --translator $(TRANSLATOR),)
+MODEL_ARGS := $(if $(filter sussurro,$(BACKEND)),--models $(MODELS) --profile $(PROFILE)$(if $(WHISPER), --whisper $(WHISPER))$(if $(TRANSLATOR), --translator $(TRANSLATOR)),)
 
 # The bundled libopus build predates CMake 4's minimum policy version.
 export CMAKE_POLICY_VERSION_MINIMUM ?= 3.5
 
-.PHONY: all build media server test test-engine test-rust test-go e2e offline lint check run lan bench browser-check clean
+.PHONY: all build media server models test test-engine test-rust test-go e2e offline lint check run lan bench browser-check clean
 
 all: build
 
@@ -30,6 +31,9 @@ media:
 
 server:
 	cd server && $(GO) build -trimpath -o $(SERVER_BIN) ./cmd/ambivox
+
+models:
+	AMBIVOX_MODELS=$(abspath $(MODELS)) AMBIVOX_PROFILE=$(PROFILE) AMBIVOX_WHISPER=$(WHISPER) AMBIVOX_TRANSLATOR=$(TRANSLATOR) scripts/setup-sussurro.sh
 
 test: test-engine test-rust test-go
 

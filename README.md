@@ -96,9 +96,13 @@ instead run on TranslateGemma through llama.cpp; see
 [docs/OPERATIONS.md](docs/OPERATIONS.md#model-directory).
 
 ```bash
-scripts/setup-sussurro.sh              # downloads the runtime and several GB of models
-make run BACKEND=sussurro MODELS=models
+make models
+make run BACKEND=sussurro
 ```
+
+`make models` downloads the runtime and several GB of models. `PROFILE=light`,
+`balanced` (the default) or `quality` picks them for both commands; see
+[docs/OPERATIONS.md](docs/OPERATIONS.md#model-directory).
 
 Open `http://127.0.0.1:8080`, start a call, open the invitation link in a
 second tab (or on another device, with `make lan`), choose two different

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Model profiles pick every model in one setting: `light` (whisper base,
+  opus), `balanced` (whisper small, opus; the default) and `quality` (whisper
+  large-v3-turbo, TranslateGemma 12B). `PROFILE` for `make`, `AMBIVOX_PROFILE`
+  for Docker and the setup script, `--profile` for `ambivox-media`; `--whisper`
+  and `--translator` still override either. The setup script downloads
+  TranslateGemma for the quality profile and checks it against a pinned
+  checksum. New `make models`.
+
 ## 0.7.0
 
 - `ambivox-media bench` and `make bench` measure a model setup on a set of

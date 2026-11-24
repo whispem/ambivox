@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Fetches everything the real speech backend needs:
 #   third_party/sherpa-onnx   prebuilt text-to-speech runtime
-#   models/                   whisper, OPUS-MT and Piper voice models
+#   models/                   whisper, translation and Piper voice models
 #
 # usage: scripts/setup-sussurro.sh [sherpa] [voices] [whisper] [translation] [converter]
 # With no argument every step but converter runs, which translation runs when
 # it needs to. Steps are idempotent. AMBIVOX_CONVERT_PYTHON names a Python that
 # already has the converter's requirements, instead of a private venv.
-# AMBIVOX_WHISPER picks the recognition model (small by default).
+# AMBIVOX_PROFILE picks the models (light, balanced or quality; balanced by
+# default); AMBIVOX_WHISPER and AMBIVOX_TRANSLATOR override either.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,9 +26,26 @@ TRANSLATION_MODELS=(
   "Helsinki-NLP/opus-mt-tc-big-it-en tc-it-en"
   "Helsinki-NLP/opus-mt-es-en es-en"
 )
+LANGUAGE_MODELS=(
+  "translategemma-12b https://huggingface.co/anilb/translategemma-gguf/resolve/main/translategemma-12b-it.Q4_K_M.gguf b7aac4b4be7ab0c49b6556c29c4467e74313df7f1e95d9f9676bb2adf0afa528 https://ai.google.dev/gemma/terms"
+)
 
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+PROFILE="${AMBIVOX_PROFILE:-balanced}"
+case "$PROFILE" in
+  light) WHISPER=base TRANSLATOR=opus ;;
+  balanced) WHISPER=small TRANSLATOR=opus ;;
+  quality) WHISPER=large-v3-turbo TRANSLATOR=translategemma-12b ;;
+  *) die "unknown profile: $PROFILE (expected light, balanced or quality)" ;;
+esac
+WHISPER="${AMBIVOX_WHISPER:-$WHISPER}"
+TRANSLATOR="${AMBIVOX_TRANSLATOR:-$TRANSLATOR}"
+
+sha256() {
+  if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1
+}
 
 setup_sherpa() {
   local dest="$THIRD_PARTY/sherpa-onnx"
@@ -74,7 +92,7 @@ setup_voices() {
 }
 
 setup_whisper() {
-  local name="${AMBIVOX_WHISPER:-small}"
+  local name="$WHISPER"
   [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || die "invalid whisper model name: $name"
   mkdir -p "$MODELS"
   if [ -f "$MODELS/ggml-$name.bin" ]; then
@@ -88,6 +106,10 @@ setup_whisper() {
 }
 
 setup_translation() {
+  if [ "$TRANSLATOR" != opus ]; then
+    setup_language_model
+    return
+  fi
   mkdir -p "$MODELS"
   local missing=()
   for entry in "${TRANSLATION_MODELS[@]}"; do
@@ -106,6 +128,26 @@ setup_translation() {
     "$PYTHON" "$CONVERTER/scripts/convert.py" --model "$repo" --outfile "$MODELS/$name.gguf.part"
     mv "$MODELS/$name.gguf.part" "$MODELS/$name.gguf"
   done
+}
+
+setup_language_model() {
+  [[ "$TRANSLATOR" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || die "invalid translation model name: $TRANSLATOR"
+  mkdir -p "$MODELS"
+  if [ -f "$MODELS/$TRANSLATOR.gguf" ]; then
+    say "$TRANSLATOR already present"
+    return
+  fi
+  local entry name url sum terms
+  for entry in "${LANGUAGE_MODELS[@]}"; do
+    read -r name url sum terms <<<"$entry"
+    [ "$name" = "$TRANSLATOR" ] && break
+    url=""
+  done
+  [ -n "$url" ] || die "no download known for $TRANSLATOR: put $TRANSLATOR.gguf in $MODELS"
+  say "downloading $TRANSLATOR, published under $terms, which you accept by downloading it"
+  curl -fSL -C - -o "$MODELS/$TRANSLATOR.gguf.part" "$url"
+  [ "$(sha256 "$MODELS/$TRANSLATOR.gguf.part")" = "$sum" ] || die "$TRANSLATOR does not match its checksum; delete $MODELS/$TRANSLATOR.gguf.part and retry"
+  mv "$MODELS/$TRANSLATOR.gguf.part" "$MODELS/$TRANSLATOR.gguf"
 }
 
 setup_converter() {

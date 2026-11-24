@@ -69,8 +69,9 @@ to other machines. Each image holds the licences of what it was built from in
 `/usr/share/licenses/ambivox`.
 
 `AMBIVOX_ACCESS_KEY`, `AMBIVOX_INVITE_TTL`, `AMBIVOX_ECHO_GUARD`,
-`AMBIVOX_WHISPER` and `AMBIVOX_TRANSLATOR` can go in `.env` too; other settings
-from the table below are passed through `compose.yaml` the same way.
+`AMBIVOX_PROFILE`, `AMBIVOX_WHISPER` and `AMBIVOX_TRANSLATOR` can go in `.env`
+too; other settings from the table below are passed through `compose.yaml` the
+same way.
 `AMBIVOX_BACKEND=sim` runs the simulated backend, which needs no models.
 
 ### Without Docker
@@ -231,8 +232,9 @@ Every flag has an environment variable; flags win.
 | `--bitrate` | `32000` | Opus bitrate of translated speech |
 | `--partials-ms` | `800` | how often live captions are refreshed while someone speaks; `0` turns them off |
 | `--early-words` | `8` | in headphones mode, how many settled words are spoken before the sentence ends when no comma comes first |
-| `--whisper` | `small` | recognition model, `ggml-NAME.bin` in the model directory |
-| `--translator` | `opus` | translation model: `opus` for the per-pair models, or `NAME.gguf` in the model directory, run with llama.cpp |
+| `--profile` | `balanced` | models to use: `light`, `balanced` or `quality` (see [Model directory](#model-directory)) |
+| `--whisper` | from the profile | recognition model, `ggml-NAME.bin` in the model directory |
+| `--translator` | from the profile | translation model: `opus` for the per-pair models, or `NAME.gguf` in the model directory, run with llama.cpp |
 
 Budget roughly `workers × threads` cores for inference. With two participants
 talking in turn, one worker is busy at a time.
@@ -251,27 +253,33 @@ models/
   vits-piper-it_IT-paola-medium/
 ```
 
-`scripts/setup-sussurro.sh` builds this layout. It is the same one sussurro.cpp
-uses, plus the whisper model.
+`make models` builds this layout, through `scripts/setup-sussurro.sh`; in
+Docker, `docker compose run --rm models` does the same. It is the layout
+sussurro.cpp uses, plus the whisper model. Which models it holds depends on the
+profile:
 
-`small` is quick enough for any recent machine. On a fast one, a larger
-whisper model hears accents, names and noisy rooms better: `large-v3-turbo` is
-the best trade-off, `medium` sits in between. Download it with
-`AMBIVOX_WHISPER=large-v3-turbo scripts/setup-sussurro.sh whisper`, or
-`docker compose run --rm models` with the same variable in `.env`, then start
-the engine with `--whisper large-v3-turbo`; in Docker, `AMBIVOX_WHISPER` in
-`.env` does both. Any model published for whisper.cpp works the same way.
+| Profile | Recognition | Translation | For |
+|---|---|---|---|
+| `light` | whisper `base` | opus | small or older machines; less accurate |
+| `balanced` | whisper `small` | opus | any recent machine; the default |
+| `quality` | whisper `large-v3-turbo` | TranslateGemma 12B | Apple silicon or a GPU |
 
-Translation can also run on a language model through llama.cpp. ambivox is
-written for TranslateGemma, Google's translation model built on Gemma 3. Use
-the 12B on Apple silicon or a machine with a GPU: download a GGUF of it (a
-`Q4_K_M` quantisation, about 7 GB), put it in the model directory as, for
-instance, `translategemma-12b.gguf`, and start the engine with
-`--translator translategemma-12b` (`TRANSLATOR=translategemma-12b` with `make`,
-`AMBIVOX_TRANSLATOR` in Docker). One model covers every language pair, so the
-per-pair models are then not needed. TranslateGemma is published under
-Google's Gemma terms, which you accept by downloading it; ambivox itself stays
-MIT.
+`PROFILE=quality` picks one for `make models`, `make run` and `make bench`;
+`AMBIVOX_PROFILE=quality` in `.env` does it for both the models step and the
+engine in Docker. `WHISPER` and `TRANSLATOR` (`AMBIVOX_WHISPER` and
+`AMBIVOX_TRANSLATOR` in Docker, `--whisper` and `--translator` for the engine)
+replace either model of a profile. Any model published for whisper.cpp works;
+`medium` sits between `small` and `large-v3-turbo`, and a larger one hears
+accents, names and noisy rooms better.
+
+The quality profile translates with TranslateGemma, Google's translation model
+built on Gemma 3, run through llama.cpp. The setup downloads a `Q4_K_M`
+quantisation of the 12B, about 7 GB, and checks it against a pinned checksum.
+It is published under Google's Gemma terms, which you accept by downloading
+it; ambivox itself stays MIT. One model covers every language pair, so this
+profile skips the per-pair models. Another GGUF prompted the way TranslateGemma
+expects can go in the model directory as `NAME.gguf`, picked with
+`--translator NAME`.
 
 On an M5 Max with the synthetic voices of `make bench`, the 12B scores a chrF
 of 77.4 against 76.9 for opus on the sentence text, with clear gains from and
@@ -281,9 +289,10 @@ against 147 ms) and tends to use the formal register, `vous` in French. The
 voice does not wait for the whole translation: each clause is spoken as soon as
 the model has written it, so a sentence with a comma or a full stop in the
 middle is heard sooner, 382 ms at the median on the bench and more on long
-sentences. The 4B scored below opus and is not worth the extra time. On a CPU
-the 12B is too slow for a call: keep opus there. Run `make bench` with both
-translators on your own machine before choosing.
+sentences. The 4B scored below opus and is not worth the extra time. On a CPU,
+which includes the Docker images, the 12B is too slow for a call: keep
+`balanced` there. Run `make bench` with each profile on your own machine before
+choosing.
 
 Two filters keep noises out of the captions. The voice detector only passes
 sounds with a pitch, as voices have; a knock, a door or a clap has none and
